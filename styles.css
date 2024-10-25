@@ -1,0 +1,108 @@
+/* AI Plugin Styles */
+
+/* ... (previous styles remain the same) ... */
+
+/* Preview Modal */
+.ai-plugin-preview-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 80%;
+  max-width: 800px;
+  max-height: 80vh;
+  background-color: var(--background-primary);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-plugin-preview-content {
+  display: flex;
+  gap: 16px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.ai-plugin-preview-original,
+.ai-plugin-preview-modified {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-plugin-preview-original h4,
+.ai-plugin-preview-modified h4 {
+  margin: 0 0 8px;
+  color: var(--text-normal);
+}
+
+.ai-plugin-preview-original pre,
+.ai-plugin-preview-modified pre {
+  margin: 0;
+  padding: 8px;
+  background-color: var(--background-secondary);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+.ai-plugin-preview-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 16px;
+  background-color: var(--background-secondary);
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Inbox Settings */
+.ai-plugin-inbox-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ai-plugin-toggle {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.ai-plugin-toggle input[type="checkbox"] {
+  margin: 0;
+}
+
+/* Chat Enhancements */
+.ai-plugin-append-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 8px;
+}
+
+.ai-plugin-message {
+  position: relative;
+}
+
+.ai-plugin-message .ai-plugin-action-button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.ai-plugin-message:hover .ai-plugin-action-button {
+  opacity: 1;
+}
+
+.ai-plugin-message-content {
+  padding-right: 32px;
+}
