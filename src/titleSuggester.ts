@@ -1,8 +1,8 @@
 import { App, TFile } from 'obsidian';
 import { ModelManager } from './modelManager';
-import { VaultQuerier } from './vaultQuerier';
+import { SearchOptions, VaultQuerier } from './vaultQuerier';
 
-interface TitleSuggestion {
+export interface TitleSuggestion {
   title: string;
   confidence: number;
   alternates: string[];
@@ -82,7 +82,10 @@ export class TitleSuggester {
   }
 
   private async findSimilarNotes(file: TFile): Promise<string[]> {
-    const similarNotes = await this.vaultQuerier.queryVault(await this.app.vault.read(file), 5);
+    const searchOptions: SearchOptions = {
+      limit: 5 // Replace 'limit' with the actual property name expected by SearchOptions
+    };
+    const similarNotes = await this.vaultQuerier.queryVault(await this.app.vault.read(file), searchOptions);
     return similarNotes.map(result => result.file.basename);
   }
 

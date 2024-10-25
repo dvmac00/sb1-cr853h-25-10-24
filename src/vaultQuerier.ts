@@ -2,14 +2,14 @@ import { TFile, Vault } from 'obsidian';
 import { EmbeddingManager, Embedding } from './embeddings';
 import { DatabaseManager } from './db';
 
-interface SearchResult {
+export interface SearchResult {
   file: TFile;
   similarity: number;
   relevantContent?: string;
   matchingChunks?: string[];
 }
 
-interface SearchOptions {
+export interface SearchOptions {
   limit?: number;
   threshold?: number;
   includeContent?: boolean;

@@ -1,5 +1,5 @@
 import { App, Modal, Plugin, PluginSettingTab, Setting } from 'obsidian';
-import { AIPluginView, AI_PLUGIN_VIEW_TYPE } from './src/AIPluginView';
+import { AIPluginView, AI_PLUGIN_VIEW_TYPE, AtomicNotesPreviewModal, ConceptsModal, SimilarNotesModal, TagSuggestionModal, TitleSuggestionModal } from './src/AIPluginView';
 import { ModelManager, ModelProvider } from './src/modelManager';
 import { DatabaseManager } from './src/db';
 import { EmbeddingManager } from './src/embeddings';
@@ -172,8 +172,8 @@ export default class AIPlugin extends Plugin {
       editorCallback: async (editor) => {
         const file = this.app.workspace.getActiveFile();
         if (file) {
-          const suggestion = await this.titleSuggester.suggestTitle(file);
-          new TitleSuggestionModal(this.app, suggestion, async (accepted) => {
+          const suggestedTitle = await this.titleSuggester.suggestTitle(file);
+          new TitleSuggestionModal(this.app, suggestedTitle, async (accepted) => {
             if (accepted) {
               // Implementation for applying title
             }
@@ -234,21 +234,50 @@ export default class AIPlugin extends Plugin {
     this.initializeManagers();
   }
 
+  // async activateView() {
+  //   const { workspace } = this.app;
+    
+  //   let leaf = workspace.getLeavesOfType(AI_PLUGIN_VIEW_TYPE)[0];
+    
+  //   if (!leaf) {
+  //     leaf = workspace.getRightLeaf(false);
+  //     await leaf.setViewState({
+  //       type: AI_PLUGIN_VIEW_TYPE,
+  //       active: true,
+  //     });
+  //   }
+    
+  //   workspace.revealLeaf(leaf);
+  // }
+
   async activateView() {
-    const { workspace } = this.app;
-    
-    let leaf = workspace.getLeavesOfType(AI_PLUGIN_VIEW_TYPE)[0];
-    
-    if (!leaf) {
-      leaf = workspace.getRightLeaf(false);
-      await leaf.setViewState({
-        type: AI_PLUGIN_VIEW_TYPE,
-        active: true,
-      });
+    try {
+        const { workspace } = this.app;
+        
+        // First try to find existing view
+        let leaf = workspace.getLeavesOfType(AI_PLUGIN_VIEW_TYPE)[0];
+        
+        if (!leaf) {
+            // Get right leaf, explicitly handle null case
+            const rightLeaf = workspace.getRightLeaf(true);
+            
+            if (!rightLeaf) {
+                console.error("Failed to create right leaf");
+                return;
+            }
+            
+            leaf = rightLeaf;
+            await leaf.setViewState({
+                type: AI_PLUGIN_VIEW_TYPE,
+                active: true,
+            });
+        }
+        
+        workspace.revealLeaf(leaf);
+    } catch (error) {
+        console.error("Error activating view:", error);
     }
-    
-    workspace.revealLeaf(leaf);
-  }
+}
 
   onunload() {
     this.app.workspace.detachLeavesOfType(AI_PLUGIN_VIEW_TYPE);
