@@ -1287,6 +1287,8 @@ var AIPluginView = class extends import_obsidian.ItemView {
     super(leaf);
     this.appendTarget = "current";
     this.selectedInboxPath = "";
+    this.typingIndicator = null;
+    this.isTyping = false;
     this.loading = false;
     this.error = null;
     this.lastUpdate = Date.now();
@@ -1307,10 +1309,12 @@ var AIPluginView = class extends import_obsidian.ItemView {
   async onOpen() {
     await this.initializeView();
     await this.startInitialIndexing();
+    this.plugin.aiChat.addContextListener(this.updateContext.bind(this));
     this.plugin.aiChat.addMessageListener(this.updateChatMessages.bind(this));
   }
   async onClose() {
     this.containerEl.empty();
+    this.plugin.aiChat.removeContextListener(this.updateContext.bind(this));
     this.plugin.aiChat.removeMessageListener(this.updateChatMessages.bind(this));
   }
   createNoteSelector(container) {
@@ -1602,19 +1606,24 @@ var AIPluginView = class extends import_obsidian.ItemView {
     headerEl.createEl("h3", { text: "AI Chat" });
     const modelInfo = headerEl.createDiv("ai-plugin-model-info");
     modelInfo.setText(`Using model: ${this.plugin.modelManager.getCurrentModel()}`);
-    const appendOptions = section.createDiv("ai-plugin-append-options");
-    const appendSelect = appendOptions.createEl("select", { cls: "ai-plugin-select" });
-    appendSelect.createEl("option", { text: "Append to current note", value: "current" });
-    appendSelect.createEl("option", { text: "Append to specific note", value: "specific" });
-    appendSelect.value = this.appendTarget;
-    appendSelect.addEventListener("change", () => {
-      this.appendTarget = appendSelect.value;
-      if (this.appendTarget === "specific") {
-        new import_obsidian.Notice("Note selection will be implemented soon");
-      }
+    const contextSection = headerEl.createDiv("ai-plugin-context-section");
+    this.contextEl = contextSection.createDiv("ai-plugin-context");
+    this.updateContext(this.plugin.aiChat.getContext());
+    const contextControls = contextSection.createDiv("ai-plugin-context-controls");
+    const useCurrentBtn = contextControls.createEl("button", {
+      text: "Use Current Note",
+      cls: "ai-plugin-button"
     });
+    useCurrentBtn.addEventListener("click", () => this.setContextFromActiveFile());
+    const clearContextBtn = contextControls.createEl("button", {
+      text: "Clear Context",
+      cls: "ai-plugin-button"
+    });
+    clearContextBtn.addEventListener("click", () => this.plugin.aiChat.clearContext());
     this.chatEl = section.createDiv("ai-plugin-chat-messages");
     this.updateChatMessages(this.plugin.aiChat.getMessages());
+    this.typingIndicator = container.createDiv("ai-plugin-typing-indicator");
+    this.typingIndicator.style.display = "none";
     const inputContainer = section.createDiv("ai-plugin-chat-input-container");
     this.inputEl = inputContainer.createEl("textarea", {
       cls: "ai-plugin-chat-input",
@@ -1635,47 +1644,143 @@ var AIPluginView = class extends import_obsidian.ItemView {
       }
     });
   }
+  getActiveSelection() {
+    const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    if (!activeView)
+      return null;
+    const editor = activeView.editor;
+    const selection = editor.getSelection();
+    return selection || null;
+  }
+  async setContextFromActiveFile() {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) {
+      new import_obsidian.Notice("No active file");
+      return;
+    }
+    const selection = this.getActiveSelection();
+    try {
+      await this.plugin.aiChat.setContext(activeFile, selection);
+      new import_obsidian.Notice("Context set to current note");
+    } catch (error) {
+      new import_obsidian.Notice("Failed to set context");
+      console.error("Error setting context:", error);
+    }
+  }
+  updateContext(context) {
+    if (!this.contextEl)
+      return;
+    this.contextEl.empty();
+    if (context) {
+      const contextInfo = this.contextEl.createDiv("ai-plugin-context-info");
+      contextInfo.createEl("strong", { text: "Current Context: " });
+      contextInfo.createSpan({ text: context.file.basename });
+      if (context.selection) {
+        contextInfo.createEl("em", { text: " (selection)" });
+      }
+    } else {
+      this.contextEl.createSpan({ text: "No context set" });
+    }
+  }
   async handleSendMessage() {
     const content = this.inputEl.value.trim();
     if (!content)
       return;
     this.inputEl.value = "";
-    const typingEl = this.addTypingIndicator();
+    this.showTypingIndicator();
     try {
-      const response = await this.plugin.aiChat.sendMessage(content);
-      typingEl.remove();
-      if (this.appendTarget === "current") {
-        const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile) {
-          await this.plugin.aiChat.appendToNote(response, activeFile);
-          new import_obsidian.Notice("Response appended to current note");
-        }
-      }
+      await this.plugin.aiChat.sendMessage(content);
     } catch (error) {
-      typingEl.remove();
       new import_obsidian.Notice("Failed to send message");
       console.error("Chat error:", error);
+    } finally {
+      this.hideTypingIndicator();
+    }
+  }
+  showTypingIndicator() {
+    console.log(this.typingIndicator);
+    if (!this.typingIndicator) {
+      this.typingIndicator = this.chatEl.createDiv("ai-plugin-chat-message assistant");
+      const bubbleEl = this.typingIndicator.createDiv("ai-plugin-chat-bubble");
+      bubbleEl.createDiv("ai-plugin-typing-indicator");
+    }
+    ;
+    this.typingIndicator.style.display = "flex";
+    this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  }
+  hideTypingIndicator() {
+    if (this.typingIndicator) {
+      this.typingIndicator.remove();
+      this.typingIndicator = null;
+    }
+  }
+  updateTypingIndicator(isTyping) {
+    this.isTyping = isTyping;
+    if (this.typingIndicator) {
+      this.typingIndicator.style.display = isTyping ? "flex" : "none";
+    }
+    if (isTyping) {
+      this.chatEl.scrollTop = this.chatEl.scrollHeight;
     }
   }
   updateChatMessages(messages) {
     if (!this.chatEl)
       return;
     this.chatEl.empty();
-    messages.forEach((msg) => this.addMessageToChat(msg.role, msg.content));
+    messages.forEach((msg) => this.addMessageToChat(msg.role, msg.content, msg.isResponse));
     this.chatEl.scrollTop = this.chatEl.scrollHeight;
   }
-  addMessageToChat(role, content) {
+  addMessageToChat(role, content, isResponse) {
     const messageEl = this.chatEl.createDiv("ai-plugin-chat-message");
     messageEl.addClass(role);
     const bubbleEl = messageEl.createDiv("ai-plugin-chat-bubble");
-    bubbleEl.setText(content);
+    if (role === "assistant") {
+      const contentEl = bubbleEl.createDiv("ai-plugin-chat-content");
+      import_obsidian.MarkdownRenderer.renderMarkdown(content, contentEl, "", this);
+      if (isResponse) {
+        const actionsEl = bubbleEl.createDiv("ai-plugin-chat-actions");
+        const appendCurrentBtn = actionsEl.createEl("button", {
+          cls: "ai-plugin-chat-action",
+          text: "Append to current note"
+        });
+        appendCurrentBtn.addEventListener("click", async () => {
+          const activeFile = this.app.workspace.getActiveFile();
+          if (activeFile) {
+            await this.plugin.aiChat.appendToNote(content, activeFile);
+            new import_obsidian.Notice("Response appended to current note");
+          } else {
+            new import_obsidian.Notice("No active note to append to");
+          }
+        });
+        const newNoteBtn = actionsEl.createEl("button", {
+          cls: "ai-plugin-chat-action",
+          text: "Create new note"
+        });
+        newNoteBtn.addEventListener("click", async () => {
+          try {
+            const fileName = `Chat Response ${new Date().toISOString().slice(0, 19).replace(/[:-]/g, "")}.md`;
+            await this.app.vault.create(fileName, content);
+            new import_obsidian.Notice("New note created");
+          } catch (error) {
+            new import_obsidian.Notice("Failed to create new note");
+            console.error("Error creating note:", error);
+          }
+        });
+      }
+    } else {
+      bubbleEl.setText(content);
+    }
   }
-  addTypingIndicator() {
-    const messageEl = this.chatEl.createDiv("ai-plugin-chat-message assistant");
-    const bubbleEl = messageEl.createDiv("ai-plugin-chat-bubble");
-    bubbleEl.createDiv("ai-plugin-typing-indicator");
-    this.chatEl.scrollTop = this.chatEl.scrollHeight;
-    return messageEl;
+  async sendMessage() {
+    const content = this.inputEl.value.trim();
+    if (!content)
+      return;
+    this.inputEl.value = "";
+    try {
+      await this.plugin.aiChat.sendMessage(content);
+    } catch (error) {
+      console.error("Error sending message:", error);
+    }
   }
   async enhanceCurrentNote(type) {
     const file = this.app.workspace.getActiveFile();
@@ -3471,6 +3576,9 @@ var AIChat = class {
   constructor(app, modelManager) {
     this.messages = [];
     this.messageListeners = [];
+    this.context = null;
+    this.contextListeners = [];
+    this.typingListeners = [];
     this.app = app;
     this.modelManager = modelManager;
     this.addInitialGreeting();
@@ -3478,11 +3586,15 @@ var AIChat = class {
   addInitialGreeting() {
     this.messages = [{
       role: "assistant",
-      content: "Hello! How can I help you today?"
+      content: "Hello! How can I help you today?",
+      isResponse: false
     }];
   }
   getMessages() {
     return this.messages;
+  }
+  getContext() {
+    return this.context;
   }
   addMessageListener(callback) {
     this.messageListeners.push(callback);
@@ -3490,34 +3602,103 @@ var AIChat = class {
   removeMessageListener(callback) {
     this.messageListeners = this.messageListeners.filter((cb) => cb !== callback);
   }
+  addContextListener(callback) {
+    this.contextListeners.push(callback);
+  }
+  removeContextListener(callback) {
+    this.contextListeners = this.contextListeners.filter((cb) => cb !== callback);
+  }
+  addTypingListener(callback) {
+    this.typingListeners.push(callback);
+  }
+  removeTypingListener(callback) {
+    this.typingListeners = this.typingListeners.filter((cb) => cb !== callback);
+  }
   notifyListeners() {
     this.messageListeners.forEach((callback) => callback(this.messages));
+    this.contextListeners.forEach((callback) => callback(this.context));
+  }
+  notifyTypingListeners(isTyping) {
+    this.typingListeners.forEach((callback) => callback(isTyping));
+  }
+  async setContext(file, selection) {
+    try {
+      const content = await this.app.vault.read(file);
+      this.context = {
+        file,
+        content: selection || content,
+        selection
+      };
+      this.messages.push({
+        role: "assistant",
+        content: `I'm now using "${file.basename}" as context for our conversation.` + (selection ? " I'll focus on the selected portion." : ""),
+        isResponse: false
+      });
+      this.notifyListeners();
+    } catch (error) {
+      console.error("Error setting context:", error);
+      throw error;
+    }
+  }
+  clearContext() {
+    this.context = null;
+    this.messages.push({
+      role: "assistant",
+      content: "Context cleared. How else can I help you?",
+      isResponse: false
+    });
+    this.notifyListeners();
+  }
+  formatPromptWithContext(userInput) {
+    if (!this.context) {
+      return `${userInput}
+
+Please format your response in markdown.`;
+    }
+    return `Context from note "${this.context.file.basename}":
+\`\`\`
+${this.context.content}
+\`\`\`
+
+User query: ${userInput}
+
+Please consider the above context when responding and format your response in markdown.`;
   }
   async sendMessage(content) {
     try {
       this.messages.push({ role: "user", content });
       this.notifyListeners();
-      const response = await this.modelManager.generateText(content);
-      this.messages.push({ role: "assistant", content: response });
+      this.notifyTypingListeners(true);
+      const prompt = this.formatPromptWithContext(content);
+      const response = await this.modelManager.generateText(prompt);
+      this.notifyTypingListeners(false);
+      this.messages.push({
+        role: "assistant",
+        content: response,
+        isResponse: true
+      });
       this.notifyListeners();
       return response;
     } catch (error) {
       console.error("Error generating response:", error);
+      this.notifyTypingListeners(false);
       const errorMessage = "Sorry, I encountered an error while processing your request.";
-      this.messages.push({ role: "assistant", content: errorMessage });
+      this.messages.push({
+        role: "assistant",
+        content: errorMessage,
+        isResponse: true
+      });
       this.notifyListeners();
       throw error;
     }
   }
   async appendToNote(content, targetFile) {
     try {
-      if (targetFile) {
-        const currentContent = await this.app.vault.read(targetFile);
-        const newContent = `${currentContent}
+      const currentContent = await this.app.vault.read(targetFile);
+      const newContent = `${currentContent}
 
 ${content}`;
-        await this.app.vault.modify(targetFile, newContent);
-      }
+      await this.app.vault.modify(targetFile, newContent);
     } catch (error) {
       console.error("Error appending to note:", error);
       throw error;
@@ -3525,6 +3706,7 @@ ${content}`;
   }
   clearMessages() {
     this.messages = [];
+    this.context = null;
     this.addInitialGreeting();
     this.notifyListeners();
   }

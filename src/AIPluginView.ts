@@ -1,6 +1,6 @@
-import { App, Notice, Modal, TextComponent, TFile, View, ItemView, Menu, WorkspaceLeaf } from "obsidian";
+import { App, Notice, Modal, TextComponent, TFile, View, ItemView, Menu, WorkspaceLeaf, MarkdownRenderer, MarkdownView } from "obsidian";
 import { TitleSuggestion } from "./titleSuggester";
-import { ChatMessage } from "./aiChat";
+import { ChatContext, ChatMessage } from "./aiChat";
 
 interface AtomicNote {
   title: string;
@@ -34,6 +34,11 @@ export class AIPluginView extends ItemView {
   private inputEl: HTMLTextAreaElement;
   private appendTarget: 'current' | 'specific' = 'current';
   private selectedInboxPath: string = '';
+  private contextEl: HTMLElement;
+  private typingIndicator: HTMLElement | null = null;
+  private isTyping: boolean = false;
+
+
 
   // UI state
   private loading: boolean = false;
@@ -63,17 +68,33 @@ export class AIPluginView extends ItemView {
     return "brain"; // Or whatever icon you want to use
   }
 
+  // async onOpen(): Promise<void> {
+  //   const container = this.containerEl.children[1];
+  //   container.empty();
+
+  //   const chatContainer = container.createDiv('ai-plugin-section');
+    
+  //   this.createHeader(chatContainer);
+  //   this.createContextSection(chatContainer);
+  //   this.createChatArea(chatContainer);
+  //   this.createInputArea(chatContainer);
+    
+  //   this.setupEventListeners();
+  //   this.updateChatMessages(this.plugin.aiChat.getMessages());
+  // }
   async onOpen(): Promise<void> {
     await this.initializeView();
     await this.startInitialIndexing();
+    this.plugin.aiChat.addContextListener(this.updateContext.bind(this));
+
     this.plugin.aiChat.addMessageListener(this.updateChatMessages.bind(this));
-
-
   }
 
   async onClose(): Promise<void> {
     // Cleanup code here
     this.containerEl.empty();
+    this.plugin.aiChat.removeContextListener(this.updateContext.bind(this));
+
     this.plugin.aiChat.removeMessageListener(this.updateChatMessages.bind(this));
 
   }
@@ -457,28 +478,39 @@ export class AIPluginView extends ItemView {
   private drawChatTab(container: HTMLElement): void {
     const section = container.createDiv('ai-plugin-section');
 
-    // Header
+    // Header with model info
     const headerEl = section.createDiv('ai-plugin-chat-header');
     headerEl.createEl('h3', { text: 'AI Chat' });
+    
     const modelInfo = headerEl.createDiv('ai-plugin-model-info');
     modelInfo.setText(`Using model: ${this.plugin.modelManager.getCurrentModel()}`);
 
-    // Append options
-    const appendOptions = section.createDiv('ai-plugin-append-options');
-    const appendSelect = appendOptions.createEl('select', { cls: 'ai-plugin-select' });
-    appendSelect.createEl('option', { text: 'Append to current note', value: 'current' });
-    appendSelect.createEl('option', { text: 'Append to specific note', value: 'specific' });
-    appendSelect.value = this.appendTarget;
-    appendSelect.addEventListener('change', () => {
-      this.appendTarget = appendSelect.value as 'current' | 'specific';
-      if (this.appendTarget === 'specific') {
-        new Notice('Note selection will be implemented soon');
-      }
+    // Context section with controls
+    const contextSection = headerEl.createDiv('ai-plugin-context-section');
+    this.contextEl = contextSection.createDiv('ai-plugin-context');
+    this.updateContext(this.plugin.aiChat.getContext());
+
+    const contextControls = contextSection.createDiv('ai-plugin-context-controls');
+    
+    const useCurrentBtn = contextControls.createEl('button', {
+      text: 'Use Current Note',
+      cls: 'ai-plugin-button'
     });
+    useCurrentBtn.addEventListener('click', () => this.setContextFromActiveFile());
+
+    const clearContextBtn = contextControls.createEl('button', {
+      text: 'Clear Context',
+      cls: 'ai-plugin-button'
+    });
+    clearContextBtn.addEventListener('click', () => this.plugin.aiChat.clearContext());
 
     // Chat messages
     this.chatEl = section.createDiv('ai-plugin-chat-messages');
     this.updateChatMessages(this.plugin.aiChat.getMessages());
+
+        // Create typing indicator
+        this.typingIndicator = container.createDiv('ai-plugin-typing-indicator');
+        this.typingIndicator.style.display = 'none';
 
     // Input area
     const inputContainer = section.createDiv('ai-plugin-chat-input-container');
@@ -504,53 +536,629 @@ export class AIPluginView extends ItemView {
     });
   }
 
+  private getActiveSelection(): string | null {
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!activeView) return null;
+
+    const editor = activeView.editor;
+    const selection = editor.getSelection();
+    return selection || null;
+  }
+
+  private async setContextFromActiveFile() {
+    const activeFile = this.app.workspace.getActiveFile();
+    if (!activeFile) {
+      new Notice('No active file');
+      return;
+    }
+
+    const selection = this.getActiveSelection();
+
+    try {
+      await this.plugin.aiChat.setContext(activeFile, selection);
+      new Notice('Context set to current note');
+    } catch (error) {
+      new Notice('Failed to set context');
+      console.error('Error setting context:', error);
+    }
+  }
+
+  private updateContext(context: ChatContext | null) {
+    if (!this.contextEl) return;
+    
+    this.contextEl.empty();
+    if (context) {
+      const contextInfo = this.contextEl.createDiv('ai-plugin-context-info');
+      contextInfo.createEl('strong', { text: 'Current Context: ' });
+      contextInfo.createSpan({ text: context.file.basename });
+      if (context.selection) {
+        contextInfo.createEl('em', { text: ' (selection)' });
+      }
+    } else {
+      this.contextEl.createSpan({ text: 'No context set' });
+    }
+  }
+
   private async handleSendMessage() {
     const content = this.inputEl.value.trim();
     if (!content) return;
 
     this.inputEl.value = '';
-    const typingEl = this.addTypingIndicator();
+    this.showTypingIndicator();
 
     try {
-      const response = await this.plugin.aiChat.sendMessage(content);
-      typingEl.remove();
-
-      if (this.appendTarget === 'current') {
-        const activeFile = this.app.workspace.getActiveFile();
-        if (activeFile) {
-          await this.plugin.aiChat.appendToNote(response, activeFile);
-          new Notice('Response appended to current note');
-        }
-      }
+      await this.plugin.aiChat.sendMessage(content);
     } catch (error) {
-      typingEl.remove();
       new Notice('Failed to send message');
       console.error('Chat error:', error);
+    } finally {
+      this.hideTypingIndicator();
     }
   }
+
+  private showTypingIndicator() {
+    console.log(this.typingIndicator);
+    if (!this.typingIndicator){
+          this.typingIndicator = this.chatEl.createDiv('ai-plugin-chat-message assistant');
+    const bubbleEl = this.typingIndicator.createDiv('ai-plugin-chat-bubble');
+    bubbleEl.createDiv('ai-plugin-typing-indicator');
+    };
+
+    this.typingIndicator.style.display = 'flex';
+    
+
+    this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  }
+
+  private hideTypingIndicator() {
+    if (this.typingIndicator) {
+      this.typingIndicator.remove();
+      this.typingIndicator = null;
+    }
+  }
+
+  private updateTypingIndicator(isTyping: boolean) {
+    this.isTyping = isTyping;
+    if (this.typingIndicator) {
+    this.typingIndicator.style.display = isTyping ? 'flex' : 'none';
+    }
+    if (isTyping) {
+      this.chatEl.scrollTop = this.chatEl.scrollHeight;
+    }
+  }
+
+  // private addMessageToChat(role: 'user' | 'assistant', content: string, isResponse?: boolean) {
+  //   const messageEl = this.chatEl.createDiv('ai-plugin-chat-message');
+  //   messageEl.addClass(role);
+    
+  //   const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+    
+  //   if (role === 'assistant') {
+  //     // Create markdown content
+  //     const contentEl = bubbleEl.createDiv('ai-plugin-chat-content');
+  //     MarkdownRenderer.renderMarkdown(content, contentEl, '', this);
+
+  //     // Add action buttons only for assistant messages that are responses
+  //     if (isResponse) {
+  //       const actionsEl = bubbleEl.createDiv('ai-plugin-chat-actions');
+        
+  //       const appendCurrentBtn = actionsEl.createEl('button', {
+  //         cls: 'ai-plugin-chat-action',
+  //         text: 'Append to current note'
+  //       });
+  //       appendCurrentBtn.addEventListener('click', async () => {
+  //         const activeFile = this.app.workspace.getActiveFile();
+  //         if (activeFile) {
+  //           await this.plugin.aiChat.appendToNote(content, activeFile);
+  //           new Notice('Response appended to current note');
+  //         } else {
+  //           new Notice('No active note to append to');
+  //         }
+  //       });
+
+  //       const newNoteBtn = actionsEl.createEl('button', {
+  //         cls: 'ai-plugin-chat-action',
+  //         text: 'Create new note'
+  //       });
+  //       newNoteBtn.addEventListener('click', async () => {
+  //         try {
+  //           const fileName = `Chat Response ${new Date().toISOString().slice(0, 19).replace(/[:-]/g, '')}.md`;
+  //           await this.app.vault.create(fileName, content);
+  //           new Notice('New note created');
+  //         } catch (error) {
+  //           new Notice('Failed to create new note');
+  //           console.error('Error creating note:', error);
+  //         }
+  //       });
+  //     }
+  //   } else {
+  //     // User messages are displayed as plain text
+  //     bubbleEl.setText(content);
+  //   }
+  // }
 
   private updateChatMessages(messages: ChatMessage[]) {
     if (!this.chatEl) return;
     
     this.chatEl.empty();
-    messages.forEach(msg => this.addMessageToChat(msg.role, msg.content));
+    messages.forEach(msg => this.addMessageToChat(msg.role, msg.content, msg.isResponse));
     this.chatEl.scrollTop = this.chatEl.scrollHeight;
   }
 
-  private addMessageToChat(role: 'user' | 'assistant', content: string) {
+  // private updateState(state: ChatState) {
+  //   // Update messages
+  //   this.chatEl.empty();
+  //   state.messages.forEach(msg => {
+  //     this.addMessageToChat(msg.role, msg.content, msg.isResponse);
+  //   });
+  //   // Update typing indicator
+  //   if (this.typingIndicator) {
+  //     this.typingIndicator.style.display = state.isTyping ? 'flex' : 'none';
+  //   }
+
+  //   // Scroll to bottom
+  //   if (this.chatEl) {
+  //     this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  //   }
+  // }
+
+  private addMessageToChat(role: 'user' | 'assistant', content: string, isResponse?: boolean) {
     const messageEl = this.chatEl.createDiv('ai-plugin-chat-message');
     messageEl.addClass(role);
+    
     const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
-    bubbleEl.setText(content);
+    
+    if (role === 'assistant') {
+      const contentEl = bubbleEl.createDiv('ai-plugin-chat-content');
+      MarkdownRenderer.renderMarkdown(content, contentEl, '', this);
+
+      if (isResponse) {
+        const actionsEl = bubbleEl.createDiv('ai-plugin-chat-actions');
+        
+        const appendCurrentBtn = actionsEl.createEl('button', {
+          cls: 'ai-plugin-chat-action',
+          text: 'Append to current note'
+        });
+        appendCurrentBtn.addEventListener('click', async () => {
+          const activeFile = this.app.workspace.getActiveFile();
+          if (activeFile) {
+            await this.plugin.aiChat.appendToNote(content, activeFile);
+            new Notice('Response appended to current note');
+          } else {
+            new Notice('No active note to append to');
+          }
+        });
+
+        const newNoteBtn = actionsEl.createEl('button', {
+          cls: 'ai-plugin-chat-action',
+          text: 'Create new note'
+        });
+        newNoteBtn.addEventListener('click', async () => {
+          try {
+            const fileName = `Chat Response ${new Date().toISOString().slice(0, 19).replace(/[:-]/g, '')}.md`;
+            await this.app.vault.create(fileName, content);
+            new Notice('New note created');
+          } catch (error) {
+            new Notice('Failed to create new note');
+            console.error('Error creating note:', error);
+          }
+        });
+      }
+    } else {
+      bubbleEl.setText(content);
+    }
   }
 
-  private addTypingIndicator(): HTMLElement {
-    const messageEl = this.chatEl.createDiv('ai-plugin-chat-message assistant');
-    const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
-    bubbleEl.createDiv('ai-plugin-typing-indicator');
-    this.chatEl.scrollTop = this.chatEl.scrollHeight;
-    return messageEl;
+  private async sendMessage() {
+    const content = this.inputEl.value.trim();
+    if (!content) return;
+
+    this.inputEl.value = '';
+    try {
+      await this.plugin.aiChat.sendMessage(content);
+    } catch (error) {
+      console.error('Error sending message:', error);
+    }
   }
+
+  // private drawChatTab(container: HTMLElement): void {
+  //   const section = container.createDiv('ai-plugin-section');
+
+  //   // Header with model info and context
+  //   const headerEl = section.createDiv('ai-plugin-chat-header');
+  //   headerEl.createEl('h3', { text: 'AI Chat' });
+    
+  //   const modelInfo = headerEl.createDiv('ai-plugin-model-info');
+  //   modelInfo.setText(`Using model: ${this.plugin.modelManager.getCurrentModel()}`);
+
+  //   // Context section
+  //   this.contextEl = headerEl.createDiv('ai-plugin-context');
+  //   this.updateContext(this.plugin.aiChat.getContext());
+
+  //   // Chat messages
+  //   this.chatEl = section.createDiv('ai-plugin-chat-messages');
+  //   this.updateChatMessages(this.plugin.aiChat.getMessages());
+
+  //   // Context controls
+  //   const contextControls = section.createDiv('ai-plugin-context-controls');
+    
+  //   const useCurrentBtn = contextControls.createEl('button', {
+  //     text: 'Use Current Note',
+  //     cls: 'ai-plugin-button'
+  //   });
+  //   useCurrentBtn.addEventListener('click', () => this.setContextFromActiveFile());
+
+  //   const clearContextBtn = contextControls.createEl('button', {
+  //     text: 'Clear Context',
+  //     cls: 'ai-plugin-button'
+  //   });
+  //   clearContextBtn.addEventListener('click', () => this.plugin.aiChat.clearContext());
+
+  //   // Input area
+  //   const inputContainer = section.createDiv('ai-plugin-chat-input-container');
+  //   this.inputEl = inputContainer.createEl('textarea', {
+  //     cls: 'ai-plugin-chat-input',
+  //     attr: { 
+  //       placeholder: 'Type your message...',
+  //       rows: '3'
+  //     }
+  //   });
+
+  //   const sendButton = inputContainer.createEl('button', {
+  //     text: 'Send',
+  //     cls: 'ai-plugin-chat-send'
+  //   });
+  //   sendButton.addEventListener('click', () => this.handleSendMessage());
+
+  //   this.inputEl.addEventListener('keydown', (e) => {
+  //     if (e.key === 'Enter' && !e.shiftKey) {
+  //       e.preventDefault();
+  //       this.handleSendMessage();
+  //     }
+  //   });
+  // }
+
+  // private getActiveSelection(): string | null {
+  //   const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+  //   if (!activeView) return null;
+
+  //   const editor = activeView.editor;
+  //   const selection = editor.getSelection();
+  //   return selection || null;
+  // }
+
+  // private async setContextFromActiveFile() {
+  //   const activeFile = this.app.workspace.getActiveFile();
+  //   if (!activeFile) {
+  //     new Notice('No active file');
+  //     return;
+  //   }
+
+  //   const selection = this.getActiveSelection();
+
+  //   try {
+  //     await this.plugin.aiChat.setContext(activeFile, selection);
+  //     new Notice('Context set to current note');
+  //   } catch (error) {
+  //     new Notice('Failed to set context');
+  //     console.error('Error setting context:', error);
+  //   }
+  // }
+
+  // private updateContext(context: ChatContext | null) {
+  //   if (!this.contextEl) return;
+    
+  //   this.contextEl.empty();
+  //   if (context) {
+  //     const contextInfo = this.contextEl.createDiv('ai-plugin-context-info');
+  //     contextInfo.createEl('strong', { text: 'Current Context: ' });
+  //     contextInfo.createSpan({ text: context.file.basename });
+  //     if (context.selection) {
+  //       contextInfo.createEl('em', { text: ' (selection)' });
+  //     }
+  //   } else {
+  //     this.contextEl.createSpan({ text: 'No context set' });
+  //   }
+  // }
+
+  // private async handleSendMessage() {
+  //   const content = this.inputEl.value.trim();
+  //   if (!content) return;
+
+  //   this.inputEl.value = '';
+  //   const typingEl = this.addTypingIndicator();
+
+  //   try {
+  //     await this.plugin.aiChat.sendMessage(content);
+  //     typingEl.remove();
+  //   } catch (error) {
+  //     typingEl.remove();
+  //     new Notice('Failed to send message');
+  //     console.error('Chat error:', error);
+  //   }
+  // }
+
+  // private updateChatMessages(messages: ChatMessage[]) {
+  //   if (!this.chatEl) return;
+    
+  //   this.chatEl.empty();
+  //   messages.forEach(msg => this.addMessageToChat(msg.role, msg.content));
+  //   this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  // }
+
+  // private addMessageToChat(role: 'user' | 'assistant', content: string) {
+  //   const messageEl = this.chatEl.createDiv('ai-plugin-chat-message');
+  //   messageEl.addClass(role);
+    
+  //   const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+    
+  //   if (role === 'assistant') {
+  //     // Create markdown content
+  //     const contentEl = bubbleEl.createDiv('ai-plugin-chat-content');
+  //     MarkdownRenderer.renderMarkdown(content, contentEl, '', this);
+
+  //     // Add action buttons for assistant messages
+  //     const actionsEl = bubbleEl.createDiv('ai-plugin-chat-actions');
+      
+  //     // Append to current note
+  //     const appendCurrentBtn = actionsEl.createEl('button', {
+  //       cls: 'ai-plugin-chat-action',
+  //       text: 'Append to current note'
+  //     });
+  //     appendCurrentBtn.addEventListener('click', async () => {
+  //       const activeFile = this.app.workspace.getActiveFile();
+  //       if (activeFile) {
+  //         await this.plugin.aiChat.appendToNote(content, activeFile);
+  //         new Notice('Response appended to current note');
+  //       } else {
+  //         new Notice('No active note to append to');
+  //       }
+  //     });
+
+  //     // Create new note
+  //     const newNoteBtn = actionsEl.createEl('button', {
+  //       cls: 'ai-plugin-chat-action',
+  //       text: 'Create new note'
+  //     });
+  //     newNoteBtn.addEventListener('click', async () => {
+  //       try {
+  //         const fileName = `Chat Response ${new Date().toISOString().slice(0, 19).replace(/[:-]/g, '')}.md`;
+  //         await this.app.vault.create(fileName, content);
+  //         new Notice('New note created');
+  //       } catch (error) {
+  //         new Notice('Failed to create new note');
+  //         console.error('Error creating note:', error);
+  //       }
+  //     });
+  //   } else {
+  //     // User messages are displayed as plain text
+  //     bubbleEl.setText(content);
+  //   }
+  // }
+
+  // private addTypingIndicator(): HTMLElement {
+  //   const messageEl = this.chatEl.createDiv('ai-plugin-chat-message assistant');
+  //   const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+  //   bubbleEl.createDiv('ai-plugin-typing-indicator');
+  //   this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  //   return messageEl;
+  // }
+  // private drawChatTab(container: HTMLElement): void {
+  //   const section = container.createDiv('ai-plugin-section');
+
+  //   // Header
+  //   const headerEl = section.createDiv('ai-plugin-chat-header');
+  //   headerEl.createEl('h3', { text: 'AI Chat' });
+  //   const modelInfo = headerEl.createDiv('ai-plugin-model-info');
+  //   modelInfo.setText(`Using model: ${this.plugin.modelManager.getCurrentModel()}`);
+
+  //   // Chat messages
+  //   this.chatEl = section.createDiv('ai-plugin-chat-messages');
+  //   this.updateChatMessages(this.plugin.aiChat.getMessages());
+
+  //   // Input area
+  //   const inputContainer = section.createDiv('ai-plugin-chat-input-container');
+  //   this.inputEl = inputContainer.createEl('textarea', {
+  //     cls: 'ai-plugin-chat-input',
+  //     attr: { 
+  //       placeholder: 'Type your message...',
+  //       rows: '3'
+  //     }
+  //   });
+
+  //   const sendButton = inputContainer.createEl('button', {
+  //     text: 'Send',
+  //     cls: 'ai-plugin-chat-send'
+  //   });
+  //   sendButton.addEventListener('click', () => this.handleSendMessage());
+
+  //   this.inputEl.addEventListener('keydown', (e) => {
+  //     if (e.key === 'Enter' && !e.shiftKey) {
+  //       e.preventDefault();
+  //       this.handleSendMessage();
+  //     }
+  //   });
+  // }
+
+  // private async handleSendMessage() {
+  //   const content = this.inputEl.value.trim();
+  //   if (!content) return;
+
+  //   this.inputEl.value = '';
+  //   const typingEl = this.addTypingIndicator();
+
+  //   try {
+  //     await this.plugin.aiChat.sendMessage(content);
+  //     typingEl.remove();
+  //   } catch (error) {
+  //     typingEl.remove();
+  //     new Notice('Failed to send message');
+  //     console.error('Chat error:', error);
+  //   }
+  // }
+
+  // private updateChatMessages(messages: ChatMessage[]) {
+  //   if (!this.chatEl) return;
+    
+  //   this.chatEl.empty();
+  //   messages.forEach(msg => this.addMessageToChat(msg.role, msg.content));
+  //   this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  // }
+
+  // private addMessageToChat(role: 'user' | 'assistant', content: string) {
+  //   const messageEl = this.chatEl.createDiv('ai-plugin-chat-message');
+  //   messageEl.addClass(role);
+    
+  //   const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+    
+  //   if (role === 'assistant') {
+  //     // Create markdown content
+  //     const contentEl = bubbleEl.createDiv('ai-plugin-chat-content');
+  //     MarkdownRenderer.renderMarkdown(content, contentEl, '', this);
+
+  //     // Add action buttons for assistant messages
+  //     const actionsEl = bubbleEl.createDiv('ai-plugin-chat-actions');
+      
+  //     // Append to current note
+  //     const appendCurrentBtn = actionsEl.createEl('button', {
+  //       cls: 'ai-plugin-chat-action',
+  //       text: 'Append to current note'
+  //     });
+  //     appendCurrentBtn.addEventListener('click', async () => {
+  //       const activeFile = this.app.workspace.getActiveFile();
+  //       if (activeFile) {
+  //         await this.plugin.aiChat.appendToNote(content, activeFile);
+  //         new Notice('Response appended to current note');
+  //       } else {
+  //         new Notice('No active note to append to');
+  //       }
+  //     });
+
+  //     // Create new note
+  //     const newNoteBtn = actionsEl.createEl('button', {
+  //       cls: 'ai-plugin-chat-action',
+  //       text: 'Create new note'
+  //     });
+  //     newNoteBtn.addEventListener('click', async () => {
+  //       try {
+  //         const fileName = `Chat Response ${new Date().toISOString().slice(0, 19).replace(/[:-]/g, '')}.md`;
+  //         await this.app.vault.create(fileName, content);
+  //         new Notice('New note created');
+  //       } catch (error) {
+  //         new Notice('Failed to create new note');
+  //         console.error('Error creating note:', error);
+  //       }
+  //     });
+  //   } else {
+  //     // User messages are displayed as plain text
+  //     bubbleEl.setText(content);
+  //   }
+  // }
+
+  // private addTypingIndicator(): HTMLElement {
+  //   const messageEl = this.chatEl.createDiv('ai-plugin-chat-message assistant');
+  //   const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+  //   bubbleEl.createDiv('ai-plugin-typing-indicator');
+  //   this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  //   return messageEl;
+  // }
+  // private drawChatTab(container: HTMLElement): void {
+  //   const section = container.createDiv('ai-plugin-section');
+
+  //   // Header
+  //   const headerEl = section.createDiv('ai-plugin-chat-header');
+  //   headerEl.createEl('h3', { text: 'AI Chat' });
+  //   const modelInfo = headerEl.createDiv('ai-plugin-model-info');
+  //   modelInfo.setText(`Using model: ${this.plugin.modelManager.getCurrentModel()}`);
+
+  //   // Append options
+  //   const appendOptions = section.createDiv('ai-plugin-append-options');
+  //   const appendSelect = appendOptions.createEl('select', { cls: 'ai-plugin-select' });
+  //   appendSelect.createEl('option', { text: 'Append to current note', value: 'current' });
+  //   appendSelect.createEl('option', { text: 'Append to specific note', value: 'specific' });
+  //   appendSelect.value = this.appendTarget;
+  //   appendSelect.addEventListener('change', () => {
+  //     this.appendTarget = appendSelect.value as 'current' | 'specific';
+  //     if (this.appendTarget === 'specific') {
+  //       new Notice('Note selection will be implemented soon');
+  //     }
+  //   });
+
+  //   // Chat messages
+  //   this.chatEl = section.createDiv('ai-plugin-chat-messages');
+  //   this.updateChatMessages(this.plugin.aiChat.getMessages());
+
+  //   // Input area
+  //   const inputContainer = section.createDiv('ai-plugin-chat-input-container');
+  //   this.inputEl = inputContainer.createEl('textarea', {
+  //     cls: 'ai-plugin-chat-input',
+  //     attr: { 
+  //       placeholder: 'Type your message...',
+  //       rows: '3'
+  //     }
+  //   });
+
+  //   const sendButton = inputContainer.createEl('button', {
+  //     text: 'Send',
+  //     cls: 'ai-plugin-chat-send'
+  //   });
+  //   sendButton.addEventListener('click', () => this.handleSendMessage());
+
+  //   this.inputEl.addEventListener('keydown', (e) => {
+  //     if (e.key === 'Enter' && !e.shiftKey) {
+  //       e.preventDefault();
+  //       this.handleSendMessage();
+  //     }
+  //   });
+  // }
+
+  // private async handleSendMessage() {
+  //   const content = this.inputEl.value.trim();
+  //   if (!content) return;
+
+  //   this.inputEl.value = '';
+  //   const typingEl = this.addTypingIndicator();
+
+  //   try {
+  //     const response = await this.plugin.aiChat.sendMessage(content);
+  //     typingEl.remove();
+
+  //     if (this.appendTarget === 'current') {
+  //       const activeFile = this.app.workspace.getActiveFile();
+  //       if (activeFile) {
+  //         await this.plugin.aiChat.appendToNote(response, activeFile);
+  //         new Notice('Response appended to current note');
+  //       }
+  //     }
+  //   } catch (error) {
+  //     typingEl.remove();
+  //     new Notice('Failed to send message');
+  //     console.error('Chat error:', error);
+  //   }
+  // }
+
+  // private updateChatMessages(messages: ChatMessage[]) {
+  //   if (!this.chatEl) return;
+    
+  //   this.chatEl.empty();
+  //   messages.forEach(msg => this.addMessageToChat(msg.role, msg.content));
+  //   this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  // }
+
+  // private addMessageToChat(role: 'user' | 'assistant', content: string) {
+  //   const messageEl = this.chatEl.createDiv('ai-plugin-chat-message');
+  //   messageEl.addClass(role);
+  //   const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+  //   bubbleEl.setText(content);
+  // }
+
+  // private addTypingIndicator(): HTMLElement {
+  //   const messageEl = this.chatEl.createDiv('ai-plugin-chat-message assistant');
+  //   const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+  //   bubbleEl.createDiv('ai-plugin-typing-indicator');
+  //   this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  //   return messageEl;
+  // }
 
   // private async enhanceCurrentNote(type: 'clean' | 'title' | 'tags' | 'all'): Promise<void> {
   //   const fileData = await this.getActiveFileContent();
