@@ -1,4 +1,4 @@
-import { App, Modal, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
 import { AIPluginView, AI_PLUGIN_VIEW_TYPE, AtomicNotesPreviewModal, ConceptsModal, SimilarNotesModal, TagSuggestionModal, TitleSuggestionModal } from './src/AIPluginView';
 import { ModelManager, ModelProvider } from './src/modelManager';
 import { DatabaseManager } from './src/db';
@@ -187,65 +187,105 @@ export default class AIPlugin extends Plugin {
       }
     });
 
-    this.addCommand({
-      id: 'open-ai-chat',
-      name: 'Open AI Chat',
-      callback: () => {
-        this.aiChat.openChatWindow();
-      }
-    });
+    // this.addCommand({
+    //   id: 'open-ai-chat',
+    //   name: 'Open AI Chat',
+    //   callback: () => {
+    //     this.aiChat.openChatWindow();
+    //   }
+    // });
 
     this.addSettingTab(new AIPluginSettingTab(this.app, this));
   }
 
   private async initializeManagers() {
-    // Create model manager with new configuration structure
-    this.modelManager = new ModelManager({
-      provider: this.settings.modelProvider,
-      model: this.settings.modelName,
-      endpoint: this.settings.endpoint,
-      apiKey: this.settings.apiKey,
-      modelPreferences: this.settings.modelPreferences
-    });
-
-    // Initialize model manager (this will start Ollama if needed and select appropriate model)
-    await this.modelManager.initialize();
-
-    // Initialize other managers
+    this.modelManager = new ModelManager(
+      this.settings.modelProvider,
+      this.settings.modelName,
+      this.settings.endpoint
+    );
+  
+    // Initialize the model manager first
+    try {
+      await this.modelManager.initialize();
+    } catch (error) {
+      console.error('Failed to initialize model manager:', error);
+      new Notice('Failed to initialize AI model. Please check your settings and ensure Ollama is running.');
+      return;
+    }
+  
     this.databaseManager = new DatabaseManager();
     await this.databaseManager.init();
-
+  
     this.embeddingManager = new EmbeddingManager(
       this.app.vault,
       this.modelManager,
       this.databaseManager,
       this.settings.embeddingCacheExpiration
     );
-
+  
     this.vaultQuerier = new VaultQuerier(
       this.app.vault,
       this.embeddingManager,
       this.databaseManager
     );
-
+  
     this.atomizer = new Atomizer(this.app.vault, this.modelManager);
     this.nlpManager = new NLPManager(this.modelManager);
     this.textCleaner = new TextCleaner(this.modelManager);
     this.tagSuggester = new TagSuggester(this.modelManager);
-    
-    this.titleSuggester = new TitleSuggester(
-      this.app, 
-      this.modelManager,
-      this.vaultQuerier
-    );
-
-    this.notePathManager = new NotePathManager(
-      this.app.vault,
-      this.settings.pathRules
-    );
-
+    this.titleSuggester = new TitleSuggester(this.app, this.modelManager, this.vaultQuerier);
+    this.notePathManager = new NotePathManager(this.app.vault, this.settings.pathRules);
     this.aiChat = new AIChat(this.app, this.modelManager);
   }
+  // private async initializeManagers() {
+  //   // Create model manager with new configuration structure
+  //   this.modelManager = new ModelManager({
+  //     provider: this.settings.modelProvider,
+  //     model: this.settings.modelName,
+  //     endpoint: this.settings.endpoint,
+  //     apiKey: this.settings.apiKey,
+  //     modelPreferences: this.settings.modelPreferences
+  //   });
+
+  //   // Initialize model manager (this will start Ollama if needed and select appropriate model)
+  //   await this.modelManager.initialize();
+
+  //   // Initialize other managers
+  //   this.databaseManager = new DatabaseManager();
+  //   await this.databaseManager.init();
+
+  //   this.embeddingManager = new EmbeddingManager(
+  //     this.app.vault,
+  //     this.modelManager,
+  //     this.databaseManager,
+  //     this.settings.embeddingCacheExpiration
+  //   );
+
+  //   this.vaultQuerier = new VaultQuerier(
+  //     this.app.vault,
+  //     this.embeddingManager,
+  //     this.databaseManager
+  //   );
+
+  //   this.atomizer = new Atomizer(this.app.vault, this.modelManager);
+  //   this.nlpManager = new NLPManager(this.modelManager);
+  //   this.textCleaner = new TextCleaner(this.modelManager);
+  //   this.tagSuggester = new TagSuggester(this.modelManager);
+    
+  //   this.titleSuggester = new TitleSuggester(
+  //     this.app, 
+  //     this.modelManager,
+  //     this.vaultQuerier
+  //   );
+
+  //   this.notePathManager = new NotePathManager(
+  //     this.app.vault,
+  //     this.settings.pathRules
+  //   );
+
+  //   this.aiChat = new AIChat(this.app, this.modelManager);
+  // }
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());

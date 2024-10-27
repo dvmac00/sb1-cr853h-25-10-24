@@ -1277,7 +1277,7 @@ var require_axios2 = __commonJS({
 __export(exports, {
   default: () => AIPlugin
 });
-var import_obsidian3 = __toModule(require("obsidian"));
+var import_obsidian2 = __toModule(require("obsidian"));
 
 // src/AIPluginView.ts
 var import_obsidian = __toModule(require("obsidian"));
@@ -1307,9 +1307,11 @@ var AIPluginView = class extends import_obsidian.ItemView {
   async onOpen() {
     await this.initializeView();
     await this.startInitialIndexing();
+    this.plugin.aiChat.addMessageListener(this.updateChatMessages.bind(this));
   }
   async onClose() {
     this.containerEl.empty();
+    this.plugin.aiChat.removeMessageListener(this.updateChatMessages.bind(this));
   }
   createNoteSelector(container) {
     const selectorContainer = container.createDiv("ai-plugin-note-selector-container");
@@ -1594,19 +1596,190 @@ var AIPluginView = class extends import_obsidian.ItemView {
       new ConceptsModal(this.app, concepts.result).open();
     });
   }
-  async enhanceCurrentNote(type) {
-    const fileData = await this.getActiveFileContent();
-    console.log(fileData);
-    console.log(type);
-    console.log(this.plugin);
-    if (!fileData)
+  drawChatTab(container) {
+    const section = container.createDiv("ai-plugin-section");
+    const headerEl = section.createDiv("ai-plugin-chat-header");
+    headerEl.createEl("h3", { text: "AI Chat" });
+    const modelInfo = headerEl.createDiv("ai-plugin-model-info");
+    modelInfo.setText(`Using model: ${this.plugin.modelManager.getCurrentModel()}`);
+    const appendOptions = section.createDiv("ai-plugin-append-options");
+    const appendSelect = appendOptions.createEl("select", { cls: "ai-plugin-select" });
+    appendSelect.createEl("option", { text: "Append to current note", value: "current" });
+    appendSelect.createEl("option", { text: "Append to specific note", value: "specific" });
+    appendSelect.value = this.appendTarget;
+    appendSelect.addEventListener("change", () => {
+      this.appendTarget = appendSelect.value;
+      if (this.appendTarget === "specific") {
+        new import_obsidian.Notice("Note selection will be implemented soon");
+      }
+    });
+    this.chatEl = section.createDiv("ai-plugin-chat-messages");
+    this.updateChatMessages(this.plugin.aiChat.getMessages());
+    const inputContainer = section.createDiv("ai-plugin-chat-input-container");
+    this.inputEl = inputContainer.createEl("textarea", {
+      cls: "ai-plugin-chat-input",
+      attr: {
+        placeholder: "Type your message...",
+        rows: "3"
+      }
+    });
+    const sendButton = inputContainer.createEl("button", {
+      text: "Send",
+      cls: "ai-plugin-chat-send"
+    });
+    sendButton.addEventListener("click", () => this.handleSendMessage());
+    this.inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        this.handleSendMessage();
+      }
+    });
+  }
+  async handleSendMessage() {
+    const content = this.inputEl.value.trim();
+    if (!content)
       return;
+    this.inputEl.value = "";
+    const typingEl = this.addTypingIndicator();
     try {
-      const result = await this.plugin.enhancer.enhance(fileData.content, type);
-      new import_obsidian.Notice("Note enhanced successfully");
+      const response = await this.plugin.aiChat.sendMessage(content);
+      typingEl.remove();
+      if (this.appendTarget === "current") {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (activeFile) {
+          await this.plugin.aiChat.appendToNote(response, activeFile);
+          new import_obsidian.Notice("Response appended to current note");
+        }
+      }
     } catch (error) {
-      new import_obsidian.Notice(`Error enhancing note: ${error.message}`);
+      typingEl.remove();
+      new import_obsidian.Notice("Failed to send message");
+      console.error("Chat error:", error);
     }
+  }
+  updateChatMessages(messages) {
+    if (!this.chatEl)
+      return;
+    this.chatEl.empty();
+    messages.forEach((msg) => this.addMessageToChat(msg.role, msg.content));
+    this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  }
+  addMessageToChat(role, content) {
+    const messageEl = this.chatEl.createDiv("ai-plugin-chat-message");
+    messageEl.addClass(role);
+    const bubbleEl = messageEl.createDiv("ai-plugin-chat-bubble");
+    bubbleEl.setText(content);
+  }
+  addTypingIndicator() {
+    const messageEl = this.chatEl.createDiv("ai-plugin-chat-message assistant");
+    const bubbleEl = messageEl.createDiv("ai-plugin-chat-bubble");
+    bubbleEl.createDiv("ai-plugin-typing-indicator");
+    this.chatEl.scrollTop = this.chatEl.scrollHeight;
+    return messageEl;
+  }
+  async enhanceCurrentNote(type) {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      new import_obsidian.Notice("No active file");
+      return;
+    }
+    const content = await this.app.vault.read(file);
+    let result;
+    try {
+      switch (type) {
+        case "clean":
+          result = await this.plugin.textCleaner.cleanText(content);
+          break;
+        case "title":
+          result = await this.plugin.titleSuggester.suggestTitle(file);
+          break;
+        case "tags":
+          result = await this.plugin.tagSuggester.suggestTags(file, content);
+          break;
+        case "all":
+          const [cleanContent, titleSuggestion, tags] = await Promise.all([
+            this.plugin.textCleaner.cleanText(content),
+            this.plugin.titleSuggester.suggestTitle(file),
+            this.plugin.tagSuggester.suggestTags(file, content)
+          ]);
+          result = {
+            content: cleanContent,
+            title: titleSuggestion.title,
+            tags
+          };
+          break;
+      }
+      new EnhancementPreviewModal(this.app, {
+        original: content,
+        enhanced: result,
+        type
+      }, async (accepted) => {
+        if (accepted) {
+          await this.applyEnhancements(file, result, type);
+          new import_obsidian.Notice("Note enhanced successfully");
+        }
+      }).open();
+    } catch (error) {
+      console.error("Error enhancing note:", error);
+      new import_obsidian.Notice("Failed to enhance note");
+    }
+  }
+  async applyEnhancements(file, result, type) {
+    let content = await this.app.vault.read(file);
+    switch (type) {
+      case "clean":
+        await this.app.vault.modify(file, result);
+        break;
+      case "title":
+        await this.app.vault.rename(file, `${result.title}.md`);
+        break;
+      case "tags":
+        const frontmatter = this.extractFrontmatter(content);
+        frontmatter.tags = result;
+        content = this.updateFrontmatter(content, frontmatter);
+        await this.app.vault.modify(file, content);
+        break;
+      case "all":
+        await this.app.vault.rename(file, `${result.title}.md`);
+        const allFrontmatter = this.extractFrontmatter(content);
+        allFrontmatter.tags = result.tags;
+        content = this.updateFrontmatter(result.content, allFrontmatter);
+        await this.app.vault.modify(file, content);
+        break;
+    }
+  }
+  extractFrontmatter(content) {
+    const match = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!match)
+      return {};
+    try {
+      const frontmatter = {};
+      const lines = match[1].split("\n");
+      for (const line of lines) {
+        const [key, ...values] = line.split(":");
+        if (key && values.length) {
+          frontmatter[key.trim()] = values.join(":").trim();
+        }
+      }
+      return frontmatter;
+    } catch (e) {
+      return {};
+    }
+  }
+  updateFrontmatter(content, frontmatter) {
+    const yaml = Object.entries(frontmatter).map(([key, value]) => `${key}: ${value}`).join("\n");
+    const existingFrontmatter = content.match(/^---\n[\s\S]*?\n---\n/);
+    if (existingFrontmatter) {
+      return content.replace(existingFrontmatter[0], `---
+${yaml}
+---
+`);
+    }
+    return `---
+${yaml}
+---
+
+${content}`;
   }
   drawEnhanceTab(container) {
     const section = container.createDiv("ai-plugin-section");
@@ -1623,53 +1796,6 @@ var AIPluginView = class extends import_obsidian.ItemView {
     });
     this.createActionButton(actionsDiv, "Enhance All", "zap", () => {
       this.enhanceCurrentNote("all");
-    });
-  }
-  async sendChatMessage() {
-    var _a, _b;
-    if (!((_b = (_a = this.chatInput) == null ? void 0 : _a.value) == null ? void 0 : _b.trim()))
-      return;
-    const message = this.chatInput.value;
-    this.chatInput.value = "";
-    try {
-      const response = await this.plugin.chatManager.sendMessage(message);
-      this.appendChatMessage(message, "user");
-      this.appendChatMessage(response, "assistant");
-    } catch (error) {
-      new import_obsidian.Notice(`Chat error: ${error.message}`);
-    }
-  }
-  appendChatMessage(message, type) {
-    const messageDiv = this.chatHistory.createDiv(`ai-plugin-chat-message ${type}`);
-    messageDiv.createEl("p", { text: message });
-  }
-  drawChatTab(container) {
-    const section = container.createDiv("ai-plugin-section");
-    section.createEl("h3", { text: "AI Chat" });
-    this.chatHistory = section.createDiv("ai-plugin-chat-history");
-    const appendOptions = section.createDiv("ai-plugin-append-options");
-    const appendSelect = appendOptions.createEl("select", { cls: "ai-plugin-select" });
-    appendSelect.createEl("option", { text: "Append to current note", value: "current" });
-    appendSelect.createEl("option", { text: "Append to specific note", value: "specific" });
-    appendSelect.value = this.appendTarget;
-    appendSelect.addEventListener("change", (e) => {
-      const target = e.target.value;
-      this.appendTarget = target;
-      if (target === "specific") {
-        this.showNoteSelector();
-      }
-    });
-    const inputArea = section.createDiv("ai-plugin-chat-input");
-    this.chatInput = inputArea.createEl("textarea", {
-      cls: "ai-plugin-textarea",
-      attr: { placeholder: "Type your message..." }
-    });
-    this.createActionButton(inputArea, "Send", "paper-plane", () => this.sendChatMessage());
-    this.chatInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        this.sendChatMessage();
-      }
     });
   }
   createProcessingOption(container, label) {
@@ -1922,229 +2048,267 @@ var FileBrowserModal = class extends import_obsidian.Modal {
     contentEl.empty();
   }
 };
+var EnhancementPreviewModal = class extends import_obsidian.Modal {
+  constructor(app, preview, onConfirm) {
+    super(app);
+    this.preview = preview;
+    this.onConfirm = onConfirm;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("ai-plugin-preview-modal");
+    const content = contentEl.createDiv("ai-plugin-preview-content");
+    const originalDiv = content.createDiv("ai-plugin-preview-original");
+    originalDiv.createEl("h4", { text: "Current" });
+    originalDiv.createEl("pre", { text: this.preview.original });
+    const modifiedDiv = content.createDiv("ai-plugin-preview-modified");
+    modifiedDiv.createEl("h4", { text: "Enhanced" });
+    if (typeof this.preview.enhanced === "string") {
+      modifiedDiv.createEl("pre", { text: this.preview.enhanced });
+    } else {
+      const enhancedContent = this.formatEnhancedContent(this.preview.enhanced, this.preview.type);
+      modifiedDiv.createEl("pre", { text: enhancedContent });
+    }
+    const actions = contentEl.createDiv("ai-plugin-preview-actions");
+    const acceptBtn = actions.createEl("button", {
+      cls: "ai-plugin-button",
+      text: "Accept"
+    });
+    acceptBtn.addEventListener("click", () => {
+      this.onConfirm(true);
+      this.close();
+    });
+    const rejectBtn = actions.createEl("button", {
+      cls: "ai-plugin-button",
+      text: "Cancel"
+    });
+    rejectBtn.addEventListener("click", () => {
+      this.onConfirm(false);
+      this.close();
+    });
+  }
+  formatEnhancedContent(enhanced, type) {
+    switch (type) {
+      case "title":
+        return `New Title: ${enhanced.title}
+Confidence: ${(enhanced.confidence * 100).toFixed(1)}%
+
+Alternatives:
+${enhanced.alternates.join("\n")}`;
+      case "tags":
+        return `Suggested Tags:
+${enhanced.join(", ")}`;
+      case "all":
+        return `Title: ${enhanced.title}
+Tags: ${enhanced.tags.join(", ")}
+
+Content:
+${enhanced.content}`;
+      default:
+        return JSON.stringify(enhanced, null, 2);
+    }
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+};
 
 // src/modelManager.ts
 var import_axios = __toModule(require_axios2());
-var import_child_process = __toModule(require("child_process"));
-var import_util = __toModule(require("util"));
-var execAsync = (0, import_util.promisify)(import_child_process.exec);
 var ModelProvider;
 (function(ModelProvider2) {
   ModelProvider2["Ollama"] = "ollama";
   ModelProvider2["OpenAI"] = "openai";
 })(ModelProvider || (ModelProvider = {}));
-var _ModelManager = class {
-  constructor(config) {
-    this.config = {
-      provider: ModelProvider.Ollama,
-      endpoint: _ModelManager.DEFAULT_OLLAMA_ENDPOINT,
-      modelPreferences: _ModelManager.DEFAULT_MODEL_PREFERENCES,
-      ...config
-    };
-    this.httpClient = import_axios.default.create({
-      timeout: 3e4,
-      headers: this.getHeaders()
-    });
-  }
-  getHeaders() {
-    const headers = {
-      "Content-Type": "application/json"
-    };
-    if (this.config.provider === ModelProvider.OpenAI && this.config.apiKey) {
-      headers["Authorization"] = `Bearer ${this.config.apiKey}`;
-    }
-    return headers;
+var ModelManager = class {
+  constructor(provider, model, endpoint) {
+    this.isInitialized = false;
+    this.DEFAULT_OLLAMA_MODEL = "llama2";
+    this.DEFAULT_OPENAI_MODEL = "gpt-3.5-turbo";
+    this.provider = provider;
+    this.model = model;
+    this.endpoint = endpoint;
   }
   async initialize() {
-    if (this.config.provider === ModelProvider.Ollama) {
-      const health = await this.checkOllamaHealth();
-      if (!health.isRunning) {
-        await this.startOllamaService();
-        await this.waitForOllamaReady();
-      }
-      if (health.endpoint !== this.config.endpoint) {
-        this.config.endpoint = health.endpoint;
-      }
-      await this.ensureModelAvailable();
-    }
-  }
-  async checkOllamaHealth() {
-    try {
-      await this.httpClient.get(`${this.config.endpoint}/api/tags`);
-      return { isRunning: true, endpoint: this.config.endpoint };
-    } catch (error) {
-      return { isRunning: false, endpoint: this.config.endpoint };
-    }
-  }
-  async startOllamaService() {
-    try {
-      await execAsync("ollama serve");
-    } catch (error) {
-      throw new Error("Failed to start Ollama service. Please ensure Ollama is installed.");
-    }
-  }
-  async waitForOllamaReady(maxAttempts = 10, interval = 1e3) {
-    for (let i = 0; i < maxAttempts; i++) {
-      const health = await this.checkOllamaHealth();
-      if (health.isRunning)
-        return;
-      await new Promise((resolve) => setTimeout(resolve, interval));
-    }
-    throw new Error("Ollama service failed to start in time");
-  }
-  async ensureModelAvailable() {
+    if (this.isInitialized)
+      return;
     try {
       const availableModels = await this.getAvailableModels();
-      if (this.config.model && availableModels.includes(this.config.model)) {
-        return;
+      if (availableModels.length === 0) {
+        throw new Error("No models available. Please ensure Ollama is running and has models installed.");
       }
-      for (const model of _ModelManager.OLLAMA_PREFERRED_MODELS) {
-        if (availableModels.includes(model)) {
-          this.config.model = model;
-          return;
-        }
-        const downloaded = await this.downloadOllamaModel(model);
-        if (downloaded) {
-          this.config.model = model;
-          return;
-        }
+      if (!availableModels.includes(this.model)) {
+        console.log(`Model ${this.model} not available, using ${availableModels[0]}`);
+        this.model = availableModels[0];
       }
-      console.error("No suitable model available and failed to download preferred models");
+      this.isInitialized = true;
     } catch (error) {
-      console.error("Error ensuring model availability:", error);
+      console.error("Failed to initialize ModelManager:", error);
+      throw error;
     }
   }
+  setProvider(provider) {
+    this.provider = provider;
+    this.isInitialized = false;
+  }
+  setModel(model) {
+    this.model = model;
+    this.isInitialized = false;
+  }
+  setEndpoint(endpoint) {
+    this.endpoint = endpoint;
+    this.isInitialized = false;
+  }
+  getCurrentModel() {
+    return this.model;
+  }
   async getAvailableModels() {
-    var _a;
     try {
-      switch (this.config.provider) {
-        case ModelProvider.Ollama:
-          const response = await this.httpClient.get(`${this.config.endpoint}/api/tags`);
-          return ((_a = response.data.models) == null ? void 0 : _a.map((model) => model.name)) || [];
-        case ModelProvider.OpenAI:
-          return ["gpt-3.5-turbo", "gpt-4"];
-        default:
-          return [];
+      const response = await import_axios.default.get(`${this.endpoint}/api/tags`);
+      if (response.data && Array.isArray(response.data.models)) {
+        return response.data.models.map((model) => model.name);
       }
+      return [];
     } catch (error) {
-      console.error("Failed to fetch available models:", error);
+      console.error("Failed to fetch Ollama models:", error);
+      return [];
+    }
+  }
+  async getOllamaModels() {
+    try {
+      const response = await import_axios.default.get(`${this.endpoint}/api/tags`);
+      if (response.data && Array.isArray(response.data.models)) {
+        return response.data.models.map((model) => model.name);
+      }
+      return [];
+    } catch (error) {
+      console.error("Failed to fetch Ollama models:", error);
       return [];
     }
   }
   async downloadOllamaModel(modelName) {
     try {
-      await this.httpClient.post(`${this.config.endpoint}/api/pull`, {
+      console.log(`Starting download of model: ${modelName}`);
+      const response = await import_axios.default.post(`${this.endpoint}/api/pull`, {
         name: modelName
+      }, {
+        timeout: 3e5
       });
+      console.log(`Successfully downloaded model: ${modelName}`);
       return true;
     } catch (error) {
-      console.error(`Failed to download model ${modelName}:`, error);
+      console.error(`Failed to download Ollama model ${modelName}:`, error);
       return false;
     }
   }
   async generateEmbedding(text) {
-    try {
-      switch (this.config.provider) {
-        case ModelProvider.Ollama:
-          const ollamaResponse = await this.httpClient.post(`${this.config.endpoint}/api/embeddings`, { model: this.config.model, prompt: text });
-          return ollamaResponse.data.embedding;
-        case ModelProvider.OpenAI:
-          const openAIResponse = await this.httpClient.post("https://api.openai.com/v1/embeddings", { model: "text-embedding-ada-002", input: text });
-          return openAIResponse.data.data[0].embedding;
-        default:
-          throw new Error("Unsupported model provider");
-      }
-    } catch (error) {
-      console.error("Failed to generate embedding:", error);
-      throw error;
+    await this.initialize();
+    switch (this.provider) {
+      case ModelProvider.Ollama:
+        return this.generateOllamaEmbedding(text);
+      case ModelProvider.OpenAI:
+        return this.generateOpenAIEmbedding(text);
+      default:
+        throw new Error("Unsupported model provider");
     }
   }
-  async generateText(prompt, options = {}) {
+  async generateText(prompt) {
+    await this.initialize();
     try {
-      switch (this.config.provider) {
-        case ModelProvider.Ollama:
-          return await this.generateOllamaText(prompt, options);
-        case ModelProvider.OpenAI:
-          return await this.generateOpenAIText(prompt, options);
-        default:
-          throw new Error("Unsupported model provider");
-      }
+      const response = await import_axios.default.post(`${this.endpoint}/api/generate`, {
+        model: this.model,
+        prompt,
+        stream: false
+      });
+      return response.data.response;
     } catch (error) {
       console.error("Failed to generate text:", error);
       throw error;
     }
   }
-  async generateOllamaText(prompt, options) {
-    const { temperature = 0.7, maxTokens, stream = false, onProgress } = options;
-    const response = await this.httpClient.post(`${this.config.endpoint}/api/generate`, {
-      model: this.config.model,
-      prompt,
-      stream,
-      options: {
-        temperature,
-        num_predict: maxTokens
-      }
-    }, { responseType: stream ? "stream" : "json" });
-    if (!stream) {
-      return response.data.response;
+  async generateOllamaEmbedding(text) {
+    try {
+      const response = await import_axios.default.post(`${this.endpoint}/api/embeddings`, {
+        model: this.model,
+        prompt: text
+      });
+      return response.data.embedding;
+    } catch (error) {
+      console.error("Failed to generate Ollama embedding:", error);
+      throw error;
     }
-    let fullResponse = "";
-    for await (const chunk of response.data) {
-      const lines = chunk.toString("utf8").split("\n");
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            const data = JSON.parse(line);
-            if (data.response) {
-              fullResponse += data.response;
-              onProgress == null ? void 0 : onProgress(fullResponse);
-            }
-            if (data.done) {
-              return fullResponse.trim();
-            }
-          } catch (err) {
-            console.error("Error parsing JSON:", err);
-          }
-        }
-      }
-    }
-    return fullResponse.trim();
   }
-  async generateOpenAIText(prompt, options) {
-    var _a, _b;
-    const { temperature = 0.7, maxTokens, stream = false, onProgress } = options;
-    const response = await this.httpClient.post("https://api.openai.com/v1/chat/completions", {
-      model: this.config.model,
-      messages: [{ role: "user", content: prompt }],
-      temperature,
-      max_tokens: maxTokens,
-      stream
-    }, { responseType: stream ? "stream" : "json" });
-    if (!stream) {
-      return response.data.choices[0].message.content.trim();
+  async generateOpenAIEmbedding(text) {
+    try {
+      const response = await import_axios.default.post("https://api.openai.com/v1/embeddings", {
+        model: "text-embedding-ada-002",
+        input: text
+      }, {
+        headers: {
+          "Authorization": `Bearer ${this.endpoint}`,
+          "Content-Type": "application/json"
+        }
+      });
+      return response.data.data[0].embedding;
+    } catch (error) {
+      console.error("Failed to generate OpenAI embedding:", error);
+      throw error;
     }
-    let fullResponse = "";
-    for await (const chunk of response.data) {
-      const line = chunk.toString().trim();
-      if (line.startsWith("data: ")) {
-        try {
-          const data = JSON.parse(line.slice(6));
-          if ((_b = (_a = data.choices[0]) == null ? void 0 : _a.delta) == null ? void 0 : _b.content) {
-            fullResponse += data.choices[0].delta.content;
-            onProgress == null ? void 0 : onProgress(fullResponse);
+  }
+  async generateOllamaText(prompt) {
+    try {
+      const response = await import_axios.default.post(`${this.endpoint}/api/generate`, {
+        model: this.model,
+        prompt,
+        stream: true
+      }, {
+        responseType: "stream"
+      });
+      let fullResponse = "";
+      for await (const chunk of response.data) {
+        const lines = chunk.toString("utf8").split("\n");
+        for (const line of lines) {
+          if (line.trim() !== "") {
+            try {
+              const data = JSON.parse(line);
+              if (data.response) {
+                fullResponse += data.response;
+              }
+              if (data.done) {
+                return fullResponse.trim();
+              }
+            } catch (err) {
+              console.error("Error parsing JSON:", err);
+            }
           }
-        } catch (err) {
-          console.error("Error parsing JSON:", err);
         }
       }
+      return fullResponse.trim();
+    } catch (error) {
+      console.error("Failed to generate Ollama text:", error);
+      throw error;
     }
-    return fullResponse.trim();
+  }
+  async generateOpenAIText(prompt) {
+    try {
+      const response = await import_axios.default.post("https://api.openai.com/v1/chat/completions", {
+        model: this.model,
+        messages: [{ role: "user", content: prompt }]
+      }, {
+        headers: {
+          "Authorization": `Bearer ${this.endpoint}`,
+          "Content-Type": "application/json"
+        }
+      });
+      return response.data.choices[0].message.content.trim();
+    } catch (error) {
+      console.error("Failed to generate OpenAI text:", error);
+      throw error;
+    }
   }
 };
-var ModelManager = _ModelManager;
-ModelManager.OLLAMA_PREFERRED_MODELS = [];
-ModelManager.DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434";
-ModelManager.DEFAULT_MODEL_PREFERENCES = ["mistral", "llama2", "neural-chat"];
 
 // node_modules/idb/build/index.js
 var instanceOfAny = (object, constructors) => constructors.some((c) => object instanceof c);
@@ -3303,75 +3467,66 @@ var NotePathManager = class {
 };
 
 // src/aiChat.ts
-var import_obsidian2 = __toModule(require("obsidian"));
 var AIChat = class {
   constructor(app, modelManager) {
+    this.messages = [];
+    this.messageListeners = [];
     this.app = app;
     this.modelManager = modelManager;
+    this.addInitialGreeting();
   }
-  openChatWindow() {
-    const modal = new AIChatModal(this.app, this.modelManager);
-    modal.open();
+  addInitialGreeting() {
+    this.messages = [{
+      role: "assistant",
+      content: "Hello! How can I help you today?"
+    }];
   }
-};
-var AIChatModal = class extends import_obsidian2.Modal {
-  constructor(app, modelManager) {
-    super(app);
-    this.messages = [];
-    this.currentMessageEl = null;
-    this.modelManager = modelManager;
+  getMessages() {
+    return this.messages;
   }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.addClass("ai-plugin-modal");
-    contentEl.createEl("h2", { text: "AI Chat" });
-    this.chatEl = contentEl.createDiv("ai-plugin-chat");
-    this.inputEl = contentEl.createEl("textarea", { cls: "ai-plugin-input" });
-    const buttonContainer = contentEl.createDiv("ai-plugin-button-container");
-    const sendButton = buttonContainer.createEl("button", { text: "Send", cls: "ai-plugin-button" });
-    sendButton.addEventListener("click", () => this.sendMessage());
+  addMessageListener(callback) {
+    this.messageListeners.push(callback);
   }
-  async sendMessage() {
-    const userMessage = this.inputEl.value.trim();
-    if (!userMessage)
-      return;
-    this.addMessageToChat("user", userMessage);
-    this.inputEl.value = "";
-    this.messages.push({ role: "user", content: userMessage });
+  removeMessageListener(callback) {
+    this.messageListeners = this.messageListeners.filter((cb) => cb !== callback);
+  }
+  notifyListeners() {
+    this.messageListeners.forEach((callback) => callback(this.messages));
+  }
+  async sendMessage(content) {
     try {
-      this.currentMessageEl = this.createMessageElement("assistant", "");
-      const response = await this.modelManager.generateText(this.formatPrompt());
-      if (this.currentMessageEl) {
-        this.currentMessageEl.querySelector(".ai-plugin-chat-content").textContent = response;
-      }
+      this.messages.push({ role: "user", content });
+      this.notifyListeners();
+      const response = await this.modelManager.generateText(content);
       this.messages.push({ role: "assistant", content: response });
+      this.notifyListeners();
+      return response;
     } catch (error) {
       console.error("Error generating response:", error);
-      this.addMessageToChat("assistant", "Sorry, I encountered an error while processing your request.");
-    } finally {
-      this.currentMessageEl = null;
+      const errorMessage = "Sorry, I encountered an error while processing your request.";
+      this.messages.push({ role: "assistant", content: errorMessage });
+      this.notifyListeners();
+      throw error;
     }
   }
-  addMessageToChat(role, content) {
-    this.createMessageElement(role, content);
+  async appendToNote(content, targetFile) {
+    try {
+      if (targetFile) {
+        const currentContent = await this.app.vault.read(targetFile);
+        const newContent = `${currentContent}
+
+${content}`;
+        await this.app.vault.modify(targetFile, newContent);
+      }
+    } catch (error) {
+      console.error("Error appending to note:", error);
+      throw error;
+    }
   }
-  createMessageElement(role, content) {
-    const messageEl = this.chatEl.createDiv("ai-plugin-chat-message");
-    messageEl.addClass(role);
-    const roleEl = messageEl.createDiv("ai-plugin-chat-role");
-    roleEl.textContent = role === "user" ? "You:" : "AI:";
-    const contentEl = messageEl.createDiv("ai-plugin-chat-content");
-    contentEl.textContent = content;
-    this.chatEl.scrollTop = this.chatEl.scrollHeight;
-    return messageEl;
-  }
-  formatPrompt() {
-    return this.messages.map((msg) => `${msg.role}: ${msg.content}`).join("\n");
-  }
-  onClose() {
-    const { contentEl } = this;
-    contentEl.empty();
+  clearMessages() {
+    this.messages = [];
+    this.addInitialGreeting();
+    this.notifyListeners();
   }
 };
 
@@ -3386,7 +3541,7 @@ var DEFAULT_SETTINGS = {
   pathRules: [],
   modelPreferences: ["mistral", "llama2", "neural-chat"]
 };
-var AIPlugin = class extends import_obsidian3.Plugin {
+var AIPlugin = class extends import_obsidian2.Plugin {
   async onload() {
     await this.loadSettings();
     await this.initializeManagers();
@@ -3509,24 +3664,17 @@ var AIPlugin = class extends import_obsidian3.Plugin {
         }
       }
     });
-    this.addCommand({
-      id: "open-ai-chat",
-      name: "Open AI Chat",
-      callback: () => {
-        this.aiChat.openChatWindow();
-      }
-    });
     this.addSettingTab(new AIPluginSettingTab(this.app, this));
   }
   async initializeManagers() {
-    this.modelManager = new ModelManager({
-      provider: this.settings.modelProvider,
-      model: this.settings.modelName,
-      endpoint: this.settings.endpoint,
-      apiKey: this.settings.apiKey,
-      modelPreferences: this.settings.modelPreferences
-    });
-    await this.modelManager.initialize();
+    this.modelManager = new ModelManager(this.settings.modelProvider, this.settings.modelName, this.settings.endpoint);
+    try {
+      await this.modelManager.initialize();
+    } catch (error) {
+      console.error("Failed to initialize model manager:", error);
+      new import_obsidian2.Notice("Failed to initialize AI model. Please check your settings and ensure Ollama is running.");
+      return;
+    }
     this.databaseManager = new DatabaseManager();
     await this.databaseManager.init();
     this.embeddingManager = new EmbeddingManager(this.app.vault, this.modelManager, this.databaseManager, this.settings.embeddingCacheExpiration);
@@ -3571,7 +3719,7 @@ var AIPlugin = class extends import_obsidian3.Plugin {
     this.app.workspace.detachLeavesOfType(AI_PLUGIN_VIEW_TYPE);
   }
 };
-var PreviewModal2 = class extends import_obsidian3.Modal {
+var PreviewModal2 = class extends import_obsidian2.Modal {
   constructor(app, preview, onConfirm) {
     super(app);
     this.preview = preview;
@@ -3611,7 +3759,7 @@ var PreviewModal2 = class extends import_obsidian3.Modal {
     contentEl.empty();
   }
 };
-var AIPluginSettingTab = class extends import_obsidian3.PluginSettingTab {
+var AIPluginSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -3620,28 +3768,28 @@ var AIPluginSettingTab = class extends import_obsidian3.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "AI Plugin Settings" });
-    new import_obsidian3.Setting(containerEl).setName("Model Provider").setDesc("Select the AI model provider").addDropdown((dropdown) => dropdown.addOption(ModelProvider.Ollama, "Ollama").addOption(ModelProvider.OpenAI, "OpenAI").setValue(this.plugin.settings.modelProvider).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Model Provider").setDesc("Select the AI model provider").addDropdown((dropdown) => dropdown.addOption(ModelProvider.Ollama, "Ollama").addOption(ModelProvider.OpenAI, "OpenAI").setValue(this.plugin.settings.modelProvider).onChange(async (value) => {
       this.plugin.settings.modelProvider = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian3.Setting(containerEl).setName("Model Name").setDesc("Enter the model name").addText((text) => text.setPlaceholder("llama2").setValue(this.plugin.settings.modelName).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Model Name").setDesc("Enter the model name").addText((text) => text.setPlaceholder("llama2").setValue(this.plugin.settings.modelName).onChange(async (value) => {
       this.plugin.settings.modelName = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian3.Setting(containerEl).setName("Endpoint").setDesc("Enter the API endpoint").addText((text) => text.setPlaceholder("http://localhost:11434").setValue(this.plugin.settings.endpoint).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Endpoint").setDesc("Enter the API endpoint").addText((text) => text.setPlaceholder("http://localhost:11434").setValue(this.plugin.settings.endpoint).onChange(async (value) => {
       this.plugin.settings.endpoint = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian3.Setting(containerEl).setName("API Key").setDesc("Enter your API key (if required)").addText((text) => text.setPlaceholder("Enter your API key").setValue(this.plugin.settings.apiKey).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("API Key").setDesc("Enter your API key (if required)").addText((text) => text.setPlaceholder("Enter your API key").setValue(this.plugin.settings.apiKey).onChange(async (value) => {
       this.plugin.settings.apiKey = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian3.Setting(containerEl).setName("Embedding Cache Expiration").setDesc("Number of days to cache embeddings").addText((text) => text.setPlaceholder("7").setValue(String(this.plugin.settings.embeddingCacheExpiration / (24 * 60 * 60 * 1e3))).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Embedding Cache Expiration").setDesc("Number of days to cache embeddings").addText((text) => text.setPlaceholder("7").setValue(String(this.plugin.settings.embeddingCacheExpiration / (24 * 60 * 60 * 1e3))).onChange(async (value) => {
       const days = parseInt(value) || 7;
       this.plugin.settings.embeddingCacheExpiration = days * 24 * 60 * 60 * 1e3;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian3.Setting(containerEl).setName("Default Inbox Path").setDesc("Path for new notes").addText((text) => text.setPlaceholder("inbox").setValue(this.plugin.settings.defaultInboxPath).onChange(async (value) => {
+    new import_obsidian2.Setting(containerEl).setName("Default Inbox Path").setDesc("Path for new notes").addText((text) => text.setPlaceholder("inbox").setValue(this.plugin.settings.defaultInboxPath).onChange(async (value) => {
       this.plugin.settings.defaultInboxPath = value;
       await this.plugin.saveSettings();
     }));

@@ -1,5 +1,6 @@
 import { App, Notice, Modal, TextComponent, TFile, View, ItemView, Menu, WorkspaceLeaf } from "obsidian";
 import { TitleSuggestion } from "./titleSuggester";
+import { ChatMessage } from "./aiChat";
 
 interface AtomicNote {
   title: string;
@@ -29,6 +30,8 @@ export class AIPluginView extends ItemView {
   private activeTab: 'organize' | 'analyze' | 'enhance' | 'chat' | 'inbox';
   private chatHistory: HTMLElement;
   private chatInput: HTMLTextAreaElement;
+  private chatEl: HTMLElement;
+  private inputEl: HTMLTextAreaElement;
   private appendTarget: 'current' | 'specific' = 'current';
   private selectedInboxPath: string = '';
 
@@ -63,12 +66,16 @@ export class AIPluginView extends ItemView {
   async onOpen(): Promise<void> {
     await this.initializeView();
     await this.startInitialIndexing();
+    this.plugin.aiChat.addMessageListener(this.updateChatMessages.bind(this));
+
 
   }
 
   async onClose(): Promise<void> {
     // Cleanup code here
     this.containerEl.empty();
+    this.plugin.aiChat.removeMessageListener(this.updateChatMessages.bind(this));
+
   }
 
   // inserting here
@@ -447,20 +454,231 @@ export class AIPluginView extends ItemView {
     });
   }
 
-  private async enhanceCurrentNote(type: 'clean' | 'title' | 'tags' | 'all'): Promise<void> {
-    const fileData = await this.getActiveFileContent();
-    console.log(fileData);
-    console.log(type);
-    console.log(this.plugin);
-    if (!fileData) return;
+  private drawChatTab(container: HTMLElement): void {
+    const section = container.createDiv('ai-plugin-section');
+
+    // Header
+    const headerEl = section.createDiv('ai-plugin-chat-header');
+    headerEl.createEl('h3', { text: 'AI Chat' });
+    const modelInfo = headerEl.createDiv('ai-plugin-model-info');
+    modelInfo.setText(`Using model: ${this.plugin.modelManager.getCurrentModel()}`);
+
+    // Append options
+    const appendOptions = section.createDiv('ai-plugin-append-options');
+    const appendSelect = appendOptions.createEl('select', { cls: 'ai-plugin-select' });
+    appendSelect.createEl('option', { text: 'Append to current note', value: 'current' });
+    appendSelect.createEl('option', { text: 'Append to specific note', value: 'specific' });
+    appendSelect.value = this.appendTarget;
+    appendSelect.addEventListener('change', () => {
+      this.appendTarget = appendSelect.value as 'current' | 'specific';
+      if (this.appendTarget === 'specific') {
+        new Notice('Note selection will be implemented soon');
+      }
+    });
+
+    // Chat messages
+    this.chatEl = section.createDiv('ai-plugin-chat-messages');
+    this.updateChatMessages(this.plugin.aiChat.getMessages());
+
+    // Input area
+    const inputContainer = section.createDiv('ai-plugin-chat-input-container');
+    this.inputEl = inputContainer.createEl('textarea', {
+      cls: 'ai-plugin-chat-input',
+      attr: { 
+        placeholder: 'Type your message...',
+        rows: '3'
+      }
+    });
+
+    const sendButton = inputContainer.createEl('button', {
+      text: 'Send',
+      cls: 'ai-plugin-chat-send'
+    });
+    sendButton.addEventListener('click', () => this.handleSendMessage());
+
+    this.inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        this.handleSendMessage();
+      }
+    });
+  }
+
+  private async handleSendMessage() {
+    const content = this.inputEl.value.trim();
+    if (!content) return;
+
+    this.inputEl.value = '';
+    const typingEl = this.addTypingIndicator();
 
     try {
-      const result = await this.plugin.enhancer.enhance(fileData.content, type);
-      // Handle the enhancement result
-      new Notice('Note enhanced successfully');
+      const response = await this.plugin.aiChat.sendMessage(content);
+      typingEl.remove();
+
+      if (this.appendTarget === 'current') {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (activeFile) {
+          await this.plugin.aiChat.appendToNote(response, activeFile);
+          new Notice('Response appended to current note');
+        }
+      }
     } catch (error) {
-      new Notice(`Error enhancing note: ${error.message}`);
+      typingEl.remove();
+      new Notice('Failed to send message');
+      console.error('Chat error:', error);
     }
+  }
+
+  private updateChatMessages(messages: ChatMessage[]) {
+    if (!this.chatEl) return;
+    
+    this.chatEl.empty();
+    messages.forEach(msg => this.addMessageToChat(msg.role, msg.content));
+    this.chatEl.scrollTop = this.chatEl.scrollHeight;
+  }
+
+  private addMessageToChat(role: 'user' | 'assistant', content: string) {
+    const messageEl = this.chatEl.createDiv('ai-plugin-chat-message');
+    messageEl.addClass(role);
+    const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+    bubbleEl.setText(content);
+  }
+
+  private addTypingIndicator(): HTMLElement {
+    const messageEl = this.chatEl.createDiv('ai-plugin-chat-message assistant');
+    const bubbleEl = messageEl.createDiv('ai-plugin-chat-bubble');
+    bubbleEl.createDiv('ai-plugin-typing-indicator');
+    this.chatEl.scrollTop = this.chatEl.scrollHeight;
+    return messageEl;
+  }
+
+  // private async enhanceCurrentNote(type: 'clean' | 'title' | 'tags' | 'all'): Promise<void> {
+  //   const fileData = await this.getActiveFileContent();
+  //   console.log(fileData);
+  //   console.log(type);
+  //   console.log(this.plugin);
+  //   if (!fileData) return;
+
+  //   try {
+  //     const result = await this.plugin.enhancer.enhance(fileData.content, type);
+  //     // Handle the enhancement result
+  //     new Notice('Note enhanced successfully');
+  //   } catch (error) {
+  //     new Notice(`Error enhancing note: ${error.message}`);
+  //   }
+  // }
+
+  private async enhanceCurrentNote(type: 'clean' | 'title' | 'tags' | 'all'): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      new Notice('No active file');
+      return;
+    }
+
+    const content = await this.app.vault.read(file);
+    let result: { content: any; title: any; tags: any; };
+
+    try {
+      switch (type) {
+        case 'clean':
+          result = await this.plugin.textCleaner.cleanText(content);
+          break;
+        case 'title':
+          result = await this.plugin.titleSuggester.suggestTitle(file);
+          break;
+        case 'tags':
+          result = await this.plugin.tagSuggester.suggestTags(file, content);
+          break;
+        case 'all':
+          const [cleanContent, titleSuggestion, tags] = await Promise.all([
+            this.plugin.textCleaner.cleanText(content),
+            this.plugin.titleSuggester.suggestTitle(file),
+            this.plugin.tagSuggester.suggestTags(file, content)
+          ]);
+          result = {
+            content: cleanContent,
+            title: titleSuggestion.title,
+            tags
+          };
+          break;
+      }
+
+      // Show preview modal with the changes
+      new EnhancementPreviewModal(this.app, {
+        original: content,
+        enhanced: result,
+        type
+      }, async (accepted) => {
+        if (accepted) {
+          await this.applyEnhancements(file, result, type);
+          new Notice('Note enhanced successfully');
+        }
+      }).open();
+    } catch (error) {
+      console.error('Error enhancing note:', error);
+      new Notice('Failed to enhance note');
+    }
+  }
+
+  private async applyEnhancements(file: TFile, result: any, type: string): Promise<void> {
+    let content = await this.app.vault.read(file);
+    
+    switch (type) {
+      case 'clean':
+        await this.app.vault.modify(file, result);
+        break;
+      
+      case 'title':
+        await this.app.vault.rename(file, `${result.title}.md`);
+        break;
+      
+      case 'tags':
+        const frontmatter = this.extractFrontmatter(content);
+        frontmatter.tags = result;
+        content = this.updateFrontmatter(content, frontmatter);
+        await this.app.vault.modify(file, content);
+        break;
+      
+      case 'all':
+        await this.app.vault.rename(file, `${result.title}.md`);
+        const allFrontmatter = this.extractFrontmatter(content);
+        allFrontmatter.tags = result.tags;
+        content = this.updateFrontmatter(result.content, allFrontmatter);
+        await this.app.vault.modify(file, content);
+        break;
+    }
+  }
+
+  private extractFrontmatter(content: string): any {
+    const match = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!match) return {};
+
+    try {
+      const frontmatter: any = {};
+      const lines = match[1].split('\n');
+      for (const line of lines) {
+        const [key, ...values] = line.split(':');
+        if (key && values.length) {
+          frontmatter[key.trim()] = values.join(':').trim();
+        }
+      }
+      return frontmatter;
+    } catch {
+      return {};
+    }
+  }
+
+  private updateFrontmatter(content: string, frontmatter: any): string {
+    const yaml = Object.entries(frontmatter)
+      .map(([key, value]) => `${key}: ${value}`)
+      .join('\n');
+    
+    const existingFrontmatter = content.match(/^---\n[\s\S]*?\n---\n/);
+    if (existingFrontmatter) {
+      return content.replace(existingFrontmatter[0], `---\n${yaml}\n---\n`);
+    }
+    
+    return `---\n${yaml}\n---\n\n${content}`;
   }
 
   private drawEnhanceTab(container: HTMLElement): void {
@@ -486,60 +704,62 @@ export class AIPluginView extends ItemView {
     });
   }
 
-  private async sendChatMessage(): Promise<void> {
-    if (!this.chatInput?.value?.trim()) return;
+  // private async sendChatMessage(): Promise<void> {
+  //   if (!this.chatInput?.value?.trim()) return;
 
-    const message = this.chatInput.value;
-    this.chatInput.value = '';
+  //   const message = this.chatInput.value;
+  //   this.chatInput.value = '';
     
-    try {
-      const response = await this.plugin.chatManager.sendMessage(message);
-      this.appendChatMessage(message, 'user');
-      this.appendChatMessage(response, 'assistant');
-    } catch (error) {
-      new Notice(`Chat error: ${error.message}`);
-    }
-  }
+  //   try {
+  //     const response = await this.plugin.chatManager.sendMessage(message);
+  //     this.appendChatMessage(message, 'user');
+  //     this.appendChatMessage(response, 'assistant');
+  //   } catch (error) {
+  //     new Notice(`Chat error: ${error.message}`);
+  //   }
+  // }
 
-  private appendChatMessage(message: string, type: 'user' | 'assistant'): void {
-    const messageDiv = this.chatHistory.createDiv(`ai-plugin-chat-message ${type}`);
-    messageDiv.createEl('p', { text: message });
-  }
+  // private appendChatMessage(message: string, type: 'user' | 'assistant'): void {
+  //   const messageDiv = this.chatHistory.createDiv(`ai-plugin-chat-message ${type}`);
+  //   messageDiv.createEl('p', { text: message });
+  // }
 
-  private drawChatTab(container: HTMLElement): void {
-    const section = container.createDiv('ai-plugin-section');
-    section.createEl('h3', { text: 'AI Chat' });
+  // private drawChatTab(container: HTMLElement): void {
+  //   const section = container.createDiv('ai-plugin-section');
+  //   section.createEl('h3', { text: 'AI Chat' });
 
-    this.chatHistory = section.createDiv('ai-plugin-chat-history');
+  //   this.chatHistory = section.createDiv('ai-plugin-chat-history');
 
-    const appendOptions = section.createDiv('ai-plugin-append-options');
-    const appendSelect = appendOptions.createEl('select', { cls: 'ai-plugin-select' });
-    appendSelect.createEl('option', { text: 'Append to current note', value: 'current' });
-    appendSelect.createEl('option', { text: 'Append to specific note', value: 'specific' });
-    appendSelect.value = this.appendTarget;
-    appendSelect.addEventListener('change', (e) => {
-      const target = (e.target as HTMLSelectElement).value as 'current' | 'specific';
-      this.appendTarget = target;
-      if (target === 'specific') {
-        this.showNoteSelector();
-      }
-    });
+  //   const appendOptions = section.createDiv('ai-plugin-append-options');
+  //   const appendSelect = appendOptions.createEl('select', { cls: 'ai-plugin-select' });
+  //   appendSelect.createEl('option', { text: 'Append to current note', value: 'current' });
+  //   appendSelect.createEl('option', { text: 'Append to specific note', value: 'specific' });
+  //   appendSelect.value = this.appendTarget;
+  //   appendSelect.addEventListener('change', (e) => {
+  //     const target = (e.target as HTMLSelectElement).value as 'current' | 'specific';
+  //     this.appendTarget = target;
+  //     if (target === 'specific') {
+  //       this.showNoteSelector();
+  //     }
+  //   });
 
-    const inputArea = section.createDiv('ai-plugin-chat-input');
-    this.chatInput = inputArea.createEl('textarea', {
-      cls: 'ai-plugin-textarea',
-      attr: { placeholder: 'Type your message...' }
-    });
+  //   const inputArea = section.createDiv('ai-plugin-chat-input');
+  //   this.chatInput = inputArea.createEl('textarea', {
+  //     cls: 'ai-plugin-textarea',
+  //     attr: { placeholder: 'Type your message...' }
+  //   });
 
-    this.createActionButton(inputArea, 'Send', 'paper-plane', () => this.sendChatMessage());
+  //   this.createActionButton(inputArea, 'Send', 'paper-plane', () => this.sendChatMessage());
 
-    this.chatInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        this.sendChatMessage();
-      }
-    });
-  }
+  //   this.chatInput.addEventListener('keydown', (e) => {
+  //     if (e.key === 'Enter' && !e.shiftKey) {
+  //       e.preventDefault();
+  //       this.sendChatMessage();
+  //     }
+  //   });
+  // }
+
+  
 
   private createProcessingOption(container: HTMLElement, label: string): void {
     const option = container.createDiv('ai-plugin-processing-option');
@@ -885,6 +1105,82 @@ export class FileBrowserModal extends Modal {
         this.close();
       });
     });
+  }
+
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+}
+
+interface EnhancementPreview {
+  original: string;
+  enhanced: any;
+  type: string;
+}
+
+export class EnhancementPreviewModal extends Modal {
+  private preview: EnhancementPreview;
+  private onConfirm: (accepted: boolean) => void;
+
+  constructor(app: App, preview: EnhancementPreview, onConfirm: (accepted: boolean) => void) {
+    super(app);
+    this.preview = preview;
+    this.onConfirm = onConfirm;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass('ai-plugin-preview-modal');
+
+    const content = contentEl.createDiv('ai-plugin-preview-content');
+    
+    const originalDiv = content.createDiv('ai-plugin-preview-original');
+    originalDiv.createEl('h4', { text: 'Current' });
+    originalDiv.createEl('pre', { text: this.preview.original });
+
+    const modifiedDiv = content.createDiv('ai-plugin-preview-modified');
+    modifiedDiv.createEl('h4', { text: 'Enhanced' });
+    
+    if (typeof this.preview.enhanced === 'string') {
+      modifiedDiv.createEl('pre', { text: this.preview.enhanced });
+    } else {
+      const enhancedContent = this.formatEnhancedContent(this.preview.enhanced, this.preview.type);
+      modifiedDiv.createEl('pre', { text: enhancedContent });
+    }
+
+    const actions = contentEl.createDiv('ai-plugin-preview-actions');
+    const acceptBtn = actions.createEl('button', {
+      cls: 'ai-plugin-button',
+      text: 'Accept'
+    });
+    acceptBtn.addEventListener('click', () => {
+      this.onConfirm(true);
+      this.close();
+    });
+
+    const rejectBtn = actions.createEl('button', {
+      cls: 'ai-plugin-button',
+      text: 'Cancel'
+    });
+    rejectBtn.addEventListener('click', () => {
+      this.onConfirm(false);
+      this.close();
+    });
+  }
+
+  private formatEnhancedContent(enhanced: any, type: string): string {
+    switch (type) {
+      case 'title':
+        return `New Title: ${enhanced.title}\nConfidence: ${(enhanced.confidence * 100).toFixed(1)}%\n\nAlternatives:\n${enhanced.alternates.join('\n')}`;
+      case 'tags':
+        return `Suggested Tags:\n${enhanced.join(', ')}`;
+      case 'all':
+        return `Title: ${enhanced.title}\nTags: ${enhanced.tags.join(', ')}\n\nContent:\n${enhanced.content}`;
+      default:
+        return JSON.stringify(enhanced, null, 2);
+    }
   }
 
   onClose() {
