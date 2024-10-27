@@ -1596,6 +1596,9 @@ var AIPluginView = class extends import_obsidian.ItemView {
   }
   async enhanceCurrentNote(type) {
     const fileData = await this.getActiveFileContent();
+    console.log(fileData);
+    console.log(type);
+    console.log(this.plugin);
     if (!fileData)
       return;
     try {
@@ -1922,160 +1925,226 @@ var FileBrowserModal = class extends import_obsidian.Modal {
 
 // src/modelManager.ts
 var import_axios = __toModule(require_axios2());
+var import_child_process = __toModule(require("child_process"));
+var import_util = __toModule(require("util"));
+var execAsync = (0, import_util.promisify)(import_child_process.exec);
 var ModelProvider;
 (function(ModelProvider2) {
   ModelProvider2["Ollama"] = "ollama";
   ModelProvider2["OpenAI"] = "openai";
 })(ModelProvider || (ModelProvider = {}));
-var ModelManager = class {
-  constructor(provider, model, endpoint) {
-    this.provider = provider;
-    this.model = model;
-    this.endpoint = endpoint;
+var _ModelManager = class {
+  constructor(config) {
+    this.config = {
+      provider: ModelProvider.Ollama,
+      endpoint: _ModelManager.DEFAULT_OLLAMA_ENDPOINT,
+      modelPreferences: _ModelManager.DEFAULT_MODEL_PREFERENCES,
+      ...config
+    };
+    this.httpClient = import_axios.default.create({
+      timeout: 3e4,
+      headers: this.getHeaders()
+    });
   }
-  setProvider(provider) {
-    this.provider = provider;
+  getHeaders() {
+    const headers = {
+      "Content-Type": "application/json"
+    };
+    if (this.config.provider === ModelProvider.OpenAI && this.config.apiKey) {
+      headers["Authorization"] = `Bearer ${this.config.apiKey}`;
+    }
+    return headers;
   }
-  setModel(model) {
-    this.model = model;
-  }
-  setEndpoint(endpoint) {
-    this.endpoint = endpoint;
-  }
-  async getAvailableModels() {
-    switch (this.provider) {
-      case ModelProvider.Ollama:
-        return this.getOllamaModels();
-      case ModelProvider.OpenAI:
-        return ["gpt-3.5-turbo", "gpt-4"];
-      default:
-        return [];
+  async initialize() {
+    if (this.config.provider === ModelProvider.Ollama) {
+      const health = await this.checkOllamaHealth();
+      if (!health.isRunning) {
+        await this.startOllamaService();
+        await this.waitForOllamaReady();
+      }
+      if (health.endpoint !== this.config.endpoint) {
+        this.config.endpoint = health.endpoint;
+      }
+      await this.ensureModelAvailable();
     }
   }
-  async getOllamaModels() {
+  async checkOllamaHealth() {
     try {
-      const response = await import_axios.default.get(`${this.endpoint}/api/tags`);
-      if (response.data && Array.isArray(response.data.models)) {
-        return response.data.models.map((model) => model.name);
-      } else {
-        console.error("Unexpected response format from Ollama API:", response.data);
-        return [];
+      await this.httpClient.get(`${this.config.endpoint}/api/tags`);
+      return { isRunning: true, endpoint: this.config.endpoint };
+    } catch (error) {
+      return { isRunning: false, endpoint: this.config.endpoint };
+    }
+  }
+  async startOllamaService() {
+    try {
+      await execAsync("ollama serve");
+    } catch (error) {
+      throw new Error("Failed to start Ollama service. Please ensure Ollama is installed.");
+    }
+  }
+  async waitForOllamaReady(maxAttempts = 10, interval = 1e3) {
+    for (let i = 0; i < maxAttempts; i++) {
+      const health = await this.checkOllamaHealth();
+      if (health.isRunning)
+        return;
+      await new Promise((resolve) => setTimeout(resolve, interval));
+    }
+    throw new Error("Ollama service failed to start in time");
+  }
+  async ensureModelAvailable() {
+    try {
+      const availableModels = await this.getAvailableModels();
+      if (this.config.model && availableModels.includes(this.config.model)) {
+        return;
+      }
+      for (const model of _ModelManager.OLLAMA_PREFERRED_MODELS) {
+        if (availableModels.includes(model)) {
+          this.config.model = model;
+          return;
+        }
+        const downloaded = await this.downloadOllamaModel(model);
+        if (downloaded) {
+          this.config.model = model;
+          return;
+        }
+      }
+      console.error("No suitable model available and failed to download preferred models");
+    } catch (error) {
+      console.error("Error ensuring model availability:", error);
+    }
+  }
+  async getAvailableModels() {
+    var _a;
+    try {
+      switch (this.config.provider) {
+        case ModelProvider.Ollama:
+          const response = await this.httpClient.get(`${this.config.endpoint}/api/tags`);
+          return ((_a = response.data.models) == null ? void 0 : _a.map((model) => model.name)) || [];
+        case ModelProvider.OpenAI:
+          return ["gpt-3.5-turbo", "gpt-4"];
+        default:
+          return [];
       }
     } catch (error) {
-      console.error("Failed to fetch Ollama models:", error);
+      console.error("Failed to fetch available models:", error);
       return [];
     }
   }
   async downloadOllamaModel(modelName) {
     try {
-      await import_axios.default.post(`${this.endpoint}/api/pull`, { name: modelName });
+      await this.httpClient.post(`${this.config.endpoint}/api/pull`, {
+        name: modelName
+      });
       return true;
     } catch (error) {
-      console.error(`Failed to download Ollama model ${modelName}:`, error);
+      console.error(`Failed to download model ${modelName}:`, error);
       return false;
     }
   }
   async generateEmbedding(text) {
-    switch (this.provider) {
-      case ModelProvider.Ollama:
-        return this.generateOllamaEmbedding(text);
-      case ModelProvider.OpenAI:
-        return this.generateOpenAIEmbedding(text);
-      default:
-        throw new Error("Unsupported model provider");
-    }
-  }
-  async generateText(prompt) {
-    switch (this.provider) {
-      case ModelProvider.Ollama:
-        return this.generateOllamaText(prompt);
-      case ModelProvider.OpenAI:
-        return this.generateOpenAIText(prompt);
-      default:
-        throw new Error("Unsupported model provider");
-    }
-  }
-  async generateOllamaEmbedding(text) {
     try {
-      const response = await import_axios.default.post(`${this.endpoint}/api/embeddings`, {
-        model: this.model,
-        prompt: text
-      });
-      return response.data.embedding;
+      switch (this.config.provider) {
+        case ModelProvider.Ollama:
+          const ollamaResponse = await this.httpClient.post(`${this.config.endpoint}/api/embeddings`, { model: this.config.model, prompt: text });
+          return ollamaResponse.data.embedding;
+        case ModelProvider.OpenAI:
+          const openAIResponse = await this.httpClient.post("https://api.openai.com/v1/embeddings", { model: "text-embedding-ada-002", input: text });
+          return openAIResponse.data.data[0].embedding;
+        default:
+          throw new Error("Unsupported model provider");
+      }
     } catch (error) {
-      console.error("Failed to generate Ollama embedding:", error);
+      console.error("Failed to generate embedding:", error);
       throw error;
     }
   }
-  async generateOpenAIEmbedding(text) {
+  async generateText(prompt, options = {}) {
     try {
-      const response = await import_axios.default.post("https://api.openai.com/v1/embeddings", {
-        model: "text-embedding-ada-002",
-        input: text
-      }, {
-        headers: {
-          "Authorization": `Bearer ${this.endpoint}`,
-          "Content-Type": "application/json"
-        }
-      });
-      return response.data.data[0].embedding;
+      switch (this.config.provider) {
+        case ModelProvider.Ollama:
+          return await this.generateOllamaText(prompt, options);
+        case ModelProvider.OpenAI:
+          return await this.generateOpenAIText(prompt, options);
+        default:
+          throw new Error("Unsupported model provider");
+      }
     } catch (error) {
-      console.error("Failed to generate OpenAI embedding:", error);
+      console.error("Failed to generate text:", error);
       throw error;
     }
   }
-  async generateOllamaText(prompt) {
-    try {
-      const response = await import_axios.default.post(`${this.endpoint}/api/generate`, {
-        model: this.model,
-        prompt,
-        stream: true
-      }, {
-        responseType: "stream"
-      });
-      let fullResponse = "";
-      for await (const chunk of response.data) {
-        const lines = chunk.toString("utf8").split("\n");
-        for (const line of lines) {
-          if (line.trim() !== "") {
-            try {
-              const data = JSON.parse(line);
-              if (data.response) {
-                fullResponse += data.response;
-              }
-              if (data.done) {
-                return fullResponse.trim();
-              }
-            } catch (err) {
-              console.error("Error parsing JSON:", err);
+  async generateOllamaText(prompt, options) {
+    const { temperature = 0.7, maxTokens, stream = false, onProgress } = options;
+    const response = await this.httpClient.post(`${this.config.endpoint}/api/generate`, {
+      model: this.config.model,
+      prompt,
+      stream,
+      options: {
+        temperature,
+        num_predict: maxTokens
+      }
+    }, { responseType: stream ? "stream" : "json" });
+    if (!stream) {
+      return response.data.response;
+    }
+    let fullResponse = "";
+    for await (const chunk of response.data) {
+      const lines = chunk.toString("utf8").split("\n");
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const data = JSON.parse(line);
+            if (data.response) {
+              fullResponse += data.response;
+              onProgress == null ? void 0 : onProgress(fullResponse);
             }
+            if (data.done) {
+              return fullResponse.trim();
+            }
+          } catch (err) {
+            console.error("Error parsing JSON:", err);
           }
         }
       }
-      return fullResponse.trim();
-    } catch (error) {
-      console.error("Failed to generate Ollama text:", error);
-      throw error;
     }
+    return fullResponse.trim();
   }
-  async generateOpenAIText(prompt) {
-    try {
-      const response = await import_axios.default.post("https://api.openai.com/v1/chat/completions", {
-        model: this.model,
-        messages: [{ role: "user", content: prompt }]
-      }, {
-        headers: {
-          "Authorization": `Bearer ${this.endpoint}`,
-          "Content-Type": "application/json"
-        }
-      });
+  async generateOpenAIText(prompt, options) {
+    var _a, _b;
+    const { temperature = 0.7, maxTokens, stream = false, onProgress } = options;
+    const response = await this.httpClient.post("https://api.openai.com/v1/chat/completions", {
+      model: this.config.model,
+      messages: [{ role: "user", content: prompt }],
+      temperature,
+      max_tokens: maxTokens,
+      stream
+    }, { responseType: stream ? "stream" : "json" });
+    if (!stream) {
       return response.data.choices[0].message.content.trim();
-    } catch (error) {
-      console.error("Failed to generate OpenAI text:", error);
-      throw error;
     }
+    let fullResponse = "";
+    for await (const chunk of response.data) {
+      const line = chunk.toString().trim();
+      if (line.startsWith("data: ")) {
+        try {
+          const data = JSON.parse(line.slice(6));
+          if ((_b = (_a = data.choices[0]) == null ? void 0 : _a.delta) == null ? void 0 : _b.content) {
+            fullResponse += data.choices[0].delta.content;
+            onProgress == null ? void 0 : onProgress(fullResponse);
+          }
+        } catch (err) {
+          console.error("Error parsing JSON:", err);
+        }
+      }
+    }
+    return fullResponse.trim();
   }
 };
+var ModelManager = _ModelManager;
+ModelManager.OLLAMA_PREFERRED_MODELS = [];
+ModelManager.DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434";
+ModelManager.DEFAULT_MODEL_PREFERENCES = ["mistral", "llama2", "neural-chat"];
 
 // node_modules/idb/build/index.js
 var instanceOfAny = (object, constructors) => constructors.some((c) => object instanceof c);
@@ -3314,12 +3383,13 @@ var DEFAULT_SETTINGS = {
   apiKey: "",
   embeddingCacheExpiration: 7 * 24 * 60 * 60 * 1e3,
   defaultInboxPath: "inbox",
-  pathRules: []
+  pathRules: [],
+  modelPreferences: ["mistral", "llama2", "neural-chat"]
 };
 var AIPlugin = class extends import_obsidian3.Plugin {
   async onload() {
     await this.loadSettings();
-    this.initializeManagers();
+    await this.initializeManagers();
     this.registerView(AI_PLUGIN_VIEW_TYPE, (leaf) => new AIPluginView(leaf, this));
     this.addRibbonIcon("bot", "AI Assistant", () => {
       this.activateView();
@@ -3404,6 +3474,8 @@ var AIPlugin = class extends import_obsidian3.Plugin {
       name: "Clean Note",
       editorCallback: async (editor) => {
         const content = editor.getValue();
+        console.log(content);
+        console.log(editor);
         const cleanedContent = await this.textCleaner.cleanText(content);
         editor.setValue(cleanedContent);
       }
@@ -3446,10 +3518,17 @@ var AIPlugin = class extends import_obsidian3.Plugin {
     });
     this.addSettingTab(new AIPluginSettingTab(this.app, this));
   }
-  initializeManagers() {
-    this.modelManager = new ModelManager(this.settings.modelProvider, this.settings.modelName, this.settings.endpoint);
+  async initializeManagers() {
+    this.modelManager = new ModelManager({
+      provider: this.settings.modelProvider,
+      model: this.settings.modelName,
+      endpoint: this.settings.endpoint,
+      apiKey: this.settings.apiKey,
+      modelPreferences: this.settings.modelPreferences
+    });
+    await this.modelManager.initialize();
     this.databaseManager = new DatabaseManager();
-    this.databaseManager.init();
+    await this.databaseManager.init();
     this.embeddingManager = new EmbeddingManager(this.app.vault, this.modelManager, this.databaseManager, this.settings.embeddingCacheExpiration);
     this.vaultQuerier = new VaultQuerier(this.app.vault, this.embeddingManager, this.databaseManager);
     this.atomizer = new Atomizer(this.app.vault, this.modelManager);
@@ -3465,7 +3544,7 @@ var AIPlugin = class extends import_obsidian3.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
-    this.initializeManagers();
+    await this.initializeManagers();
   }
   async activateView() {
     try {

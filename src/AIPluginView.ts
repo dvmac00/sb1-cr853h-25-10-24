@@ -449,6 +449,9 @@ export class AIPluginView extends ItemView {
 
   private async enhanceCurrentNote(type: 'clean' | 'title' | 'tags' | 'all'): Promise<void> {
     const fileData = await this.getActiveFileContent();
+    console.log(fileData);
+    console.log(type);
+    console.log(this.plugin);
     if (!fileData) return;
 
     try {

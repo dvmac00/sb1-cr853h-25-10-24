@@ -20,6 +20,8 @@ interface AIPluginSettings {
   embeddingCacheExpiration: number;
   defaultInboxPath: string;
   pathRules: { criteria: string; targetPath: string }[];
+  modelPreferences?: string[];
+  
 }
 
 const DEFAULT_SETTINGS: AIPluginSettings = {
@@ -29,7 +31,8 @@ const DEFAULT_SETTINGS: AIPluginSettings = {
   apiKey: '',
   embeddingCacheExpiration: 7 * 24 * 60 * 60 * 1000, // 7 days
   defaultInboxPath: 'inbox',
-  pathRules: []
+  pathRules: [],
+  modelPreferences: ['mistral', 'llama2', 'neural-chat'],
 };
 
 export default class AIPlugin extends Plugin {
@@ -48,7 +51,7 @@ export default class AIPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
-    this.initializeManagers();
+    await this.initializeManagers();
 
     this.registerView(
       AI_PLUGIN_VIEW_TYPE,
@@ -144,6 +147,8 @@ export default class AIPlugin extends Plugin {
       name: 'Clean Note',
       editorCallback: async (editor) => {
         const content = editor.getValue();
+        console.log(content);
+        console.log(editor);
         const cleanedContent = await this.textCleaner.cleanText(content);
         editor.setValue(cleanedContent);
       }
@@ -193,15 +198,22 @@ export default class AIPlugin extends Plugin {
     this.addSettingTab(new AIPluginSettingTab(this.app, this));
   }
 
-  private initializeManagers() {
-    this.modelManager = new ModelManager(
-      this.settings.modelProvider,
-      this.settings.modelName,
-      this.settings.endpoint
-    );
+  private async initializeManagers() {
+    // Create model manager with new configuration structure
+    this.modelManager = new ModelManager({
+      provider: this.settings.modelProvider,
+      model: this.settings.modelName,
+      endpoint: this.settings.endpoint,
+      apiKey: this.settings.apiKey,
+      modelPreferences: this.settings.modelPreferences
+    });
 
+    // Initialize model manager (this will start Ollama if needed and select appropriate model)
+    await this.modelManager.initialize();
+
+    // Initialize other managers
     this.databaseManager = new DatabaseManager();
-    this.databaseManager.init();
+    await this.databaseManager.init();
 
     this.embeddingManager = new EmbeddingManager(
       this.app.vault,
@@ -220,8 +232,18 @@ export default class AIPlugin extends Plugin {
     this.nlpManager = new NLPManager(this.modelManager);
     this.textCleaner = new TextCleaner(this.modelManager);
     this.tagSuggester = new TagSuggester(this.modelManager);
-    this.titleSuggester = new TitleSuggester(this.app, this.modelManager, this.vaultQuerier);
-    this.notePathManager = new NotePathManager(this.app.vault, this.settings.pathRules);
+    
+    this.titleSuggester = new TitleSuggester(
+      this.app, 
+      this.modelManager,
+      this.vaultQuerier
+    );
+
+    this.notePathManager = new NotePathManager(
+      this.app.vault,
+      this.settings.pathRules
+    );
+
     this.aiChat = new AIChat(this.app, this.modelManager);
   }
 
@@ -231,7 +253,7 @@ export default class AIPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
-    this.initializeManagers();
+    await this.initializeManagers();
   }
 
   // async activateView() {
